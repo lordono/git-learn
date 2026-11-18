@@ -181,7 +181,7 @@ function runShell(c: Ctx, words: string[], actions: ShellAction[]) {
 function savedContents(w: World): Set<string> {
   const s = new Set<string>();
   for (const cm of Object.values(w.objects)) for (const v of Object.values(cm.tree)) s.add(v);
-  for (const st of w.repo?.stash ?? []) {
+  for (const st of [...(w.repo?.stash ?? []), ...(w.repo?.lostStashes ?? [])]) {
     Object.values(st.worktree).forEach((v) => s.add(v));
     Object.values(st.index).forEach((v) => s.add(v));
   }
@@ -194,6 +194,8 @@ function safetyNotes(before: World, after: World, c: Ctx) {
   const saved = savedContents(after);
   const lostFiles: string[] = [];
   for (const p of pathsOf(before.files, before.repo.index)) {
+    // a conflicted file's <<<<<<< markers can be regenerated, so replacing them isn't a loss
+    if (before.repo.conflicts.includes(p)) continue;
     const candidates = [before.files[p], before.repo.index[p]].filter((v): v is string => v !== undefined);
     for (const v of candidates) {
       if (saved.has(v) || after.files[p] === v || after.repo.index[p] === v) continue;

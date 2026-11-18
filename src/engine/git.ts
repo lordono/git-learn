@@ -27,7 +27,7 @@ import {
   treeOf,
   tryResolve,
 } from './repo';
-import type { Commit, FileMap, RemoteRepo, World } from './types';
+import type { Commit, FileMap, RemoteRepo, StashEntry, World } from './types';
 import { carryTo, computeStatus, hardReset, ignoreMatcher, matchPaths, statLines } from './worktree';
 
 // ───────────────────────────── argument helper ─────────────────────────────
@@ -184,6 +184,14 @@ function applyMergeResult(w: World, ours: FileMap, theirs: FileMap, res: { tree:
     w.files[p] = v;
     r.index[p] = res.conflicts.includes(p) ? (ours[p] ?? theirs[p]) : v;
   }
+  r.stages = Object.fromEntries(res.conflicts.map((p) => [p, { ours: ours[p], theirs: theirs[p] }]));
+}
+
+/** git's CONFLICT line: content clash, or one side deleted the file */
+function conflictLine(p: string, ours: FileMap, theirs: FileMap, theirsLabel: string): string {
+  if (!(p in ours)) return `CONFLICT (modify/delete): ${p} deleted in HEAD and modified in ${theirsLabel}. Version ${theirsLabel} of ${p} left in tree.`;
+  if (!(p in theirs)) return `CONFLICT (modify/delete): ${p} deleted in ${theirsLabel} and modified in HEAD. Version HEAD of ${p} left in tree.`;
+  return `CONFLICT (content): Merge conflict in ${p}`;
 }
 
 function blockIfDirtyPaths(c: Ctx, paths: string[], opName: string) {
@@ -234,8 +242,8 @@ function doMerge(c: Ctx, theirs: string, message: string, theirsLabel: string) {
   applyMergeResult(w, ours, th, res);
   if (res.conflicts.length) {
     for (const p of res.conflicts) {
-      c.out(`Auto-merging ${p}`);
-      c.out(`CONFLICT (content): Merge conflict in ${p}`);
+      if (p in ours && p in th) c.out(`Auto-merging ${p}`);
+      c.out(conflictLine(p, ours, th, theirsLabel));
     }
     c.out('Automatic merge failed; fix conflicts and then commit the result.');
     r.op = { kind: 'merge', theirs, message, origHead: head };
@@ -406,6 +414,10 @@ function rm(c: Ctx, a: Args) {
     delete r.index[p];
     if (!cached) delete w.files[p];
     c.out(`rm '${p}'`);
+    if (r.conflicts.includes(p)) {
+      r.conflicts = r.conflicts.filter((x) => x !== p);
+      c.explain(`Marked ${p} as resolved by deleting it.`);
+    }
   }
   if (cached) c.explain('Removed from the staging area only: the file is still on disk, now untracked. Add it to .gitignore so it does not get re-added.');
 }
@@ -418,7 +430,9 @@ function commit(c: Ctx, a: Args) {
   const amend = a.flag('--amend');
   a.flag('--no-edit');
   const allowEmpty = a.flag('--allow-empty');
+  const resetAuthor = a.flag('--reset-author');
   a.noUnknownFlags('commit');
+  if (resetAuthor && !amend) throw new GitError('fatal: --reset-author can be used only with -C, -c or --amend.');
   if (a.rest.length) {
     throw new GitError(`error: the simulator doesn't support 'git commit <path>'.`, 'hint: stage with git add <path>, then git commit -m "..."');
   }
@@ -464,7 +478,9 @@ function commit(c: Ctx, a: Args) {
     c.ok = false;
     return;
   }
-  const id = createCommit(w, { parents, message, tree: r.index });
+  const prev = amend ? w.objects[head!] : undefined;
+  const author = prev && !resetAuthor ? { name: prev.author, email: prev.email } : identity(w);
+  const id = createCommit(w, { parents, message, tree: r.index, author });
   const kind = amend ? 'commit (amend)' : op?.kind === 'merge' ? 'commit (merge)' : !head ? 'commit (initial)' : 'commit';
   moveHead(w, id, `${kind}: ${firstLine(message)}`);
   if (op && op.kind !== 'rebase') r.op = undefined;
@@ -474,6 +490,9 @@ function commit(c: Ctx, a: Args) {
   if (stat.length) c.out(stat[stat.length - 1]);
   if (amend) {
     c.explain(`--amend doesn't edit a commit. It made a NEW commit ${short(id)} that replaces ${short(head!)} on ${br}.`);
+    const me = identity(w);
+    if (!resetAuthor && prev!.email !== me.email) c.explain(`The author is still ${prev!.author} <${prev!.email}>. --amend keeps the original author. Add --reset-author to use your current user.name / user.email (${me.email}).`);
+    if (resetAuthor) c.explain(`Author reset to ${me.name} <${me.email}>.`);
     const pushed = Object.entries(r.remoteBranches).find(([, tip]) => isAncestor(w, head!, tip));
     if (pushed) c.warn(`${short(head!)} was already pushed (it's on ${pushed[0]}). Your branch has now diverged from it, so a normal push will be rejected. Only force-push (--force-with-lease) if nobody else uses this branch.`);
   } else if (op?.kind === 'merge') {
@@ -802,9 +821,41 @@ function restorePaths(c: Ctx, specs: string[], opts: { source?: FileMap; staged:
   return paths;
 }
 
+/** checkout/restore --ours|--theirs <paths>: take one side of a conflict */
+function takeSide(c: Ctx, side: 'ours' | 'theirs', specs: string[]) {
+  const r = R(c);
+  const w = c.w;
+  if (!specs.length) throw new GitError(`fatal: --${side} needs a path, e.g. git checkout --${side} <file>`);
+  const paths = matchPaths(specs, pathsOf(r.index, w.files), (s) => new GitError(`error: pathspec '${s}' did not match any file(s) known to git`));
+  for (const p of paths) {
+    if (!r.conflicts.includes(p)) throw new GitError(`error: path '${p}' does not have ${side === 'ours' ? 'our' : 'their'} version`, `hint: '${p}' isn't in conflict. --${side} only works on conflicted files.`);
+    const v = r.stages?.[p]?.[side];
+    if (v === undefined) throw new GitError(`error: path '${p}' does not have ${side === 'ours' ? 'our' : 'their'} version`, `hint: that side deleted the file. To accept the deletion: git rm ${p}`);
+    w.files[p] = v;
+  }
+  c.out(`Updated ${plural(paths.length, 'path')} from the index`);
+  const op = r.op?.kind;
+  const who =
+    op === 'rebase'
+      ? side === 'ours'
+        ? 'the branch you are rebasing ONTO (upstream). During a rebase "ours" and "theirs" are swapped!'
+        : 'YOUR commit being replayed. During a rebase "ours" and "theirs" are swapped!'
+      : op === 'cherry-pick' || op === 'revert'
+        ? side === 'ours' ? 'your current branch (HEAD).' : `the commit being ${op === 'revert' ? 'reverted' : 'picked'}.`
+        : side === 'ours' ? 'your branch (HEAD).' : 'the branch being merged in.';
+  c.explain(`Replaced ${paths.join(', ')} with the "${side}" version: ${who} The conflict is still open until you git add ${paths.length === 1 ? paths[0] : '<file>'}.`);
+}
+
 function checkout(c: Ctx, a: Args) {
   const w = c.w;
   const r = R(c);
+  const ours = a.flag('--ours');
+  const theirs = a.flag('--theirs');
+  if (ours || theirs) {
+    const specs = a.dashdash() ?? [];
+    a.noUnknownFlags('checkout');
+    return takeSide(c, ours ? 'ours' : 'theirs', [...a.rest, ...specs]);
+  }
   const b = a.opt('-b');
   const B = a.opt('-B');
   const detach = a.flag('--detach');
@@ -854,8 +905,12 @@ function restore(c: Ctx, a: Args) {
   const staged = a.flag('--staged', '-S');
   const worktree = a.flag('--worktree', '-W');
   const source = a.opt('--source', '-s');
-  a.dashdash();
+  const ours = a.flag('--ours');
+  const theirs = a.flag('--theirs');
+  const dd = a.dashdash();
+  if (dd) a.rest.push(...dd);
   a.noUnknownFlags('restore');
+  if (ours || theirs) return takeSide(c, ours ? 'ours' : 'theirs', a.rest);
   if (!a.rest.length) throw new GitError('fatal: you must specify path(s) to restore');
   restorePaths(c, a.rest, {
     source: source ? treeOf(w, resolveRev(w, source)) : undefined,
@@ -1019,8 +1074,8 @@ function runRebase(c: Ctx) {
       op.current = cid;
       r.conflicts = res.conflicts;
       for (const p of res.conflicts) {
-        c.out(`Auto-merging ${p}`);
-        c.out(`CONFLICT (content): Merge conflict in ${p}`);
+        if (p in cur && p in cm.tree) c.out(`Auto-merging ${p}`);
+        c.out(conflictLine(p, cur, cm.tree, label));
       }
       c.err(`error: could not apply ${short(cid)}... ${firstLine(cm.message)}`);
       c.err('hint: Resolve all conflicts manually, mark them as resolved with\nhint: "git add/rm <conflicted_files>", then run "git rebase --continue".\nhint: You can instead skip this commit: run "git rebase --skip".\nhint: To abort and get back to the state before "git rebase", run "git rebase --abort".');
@@ -1119,6 +1174,7 @@ function pickLike(c: Ctx, a: Args, kind: 'cherry-pick' | 'revert') {
   const cont = a.flag('--continue');
   const abort = a.flag('--abort');
   a.flag('--no-edit');
+  const mainline = a.opt('-m', '--mainline');
   a.noUnknownFlags(kind);
   if (cont || abort) {
     if (r.op?.kind !== kind) throw new GitError(`error: no ${kind} in progress`);
@@ -1137,11 +1193,16 @@ function pickLike(c: Ctx, a: Args, kind: 'cherry-pick' | 'revert') {
   const id = resolveRev(w, rev);
   const cm = w.objects[id];
   const head = needHead(c);
-  if (cm.parents.length > 1) throw new GitError(`error: commit ${id} is a merge but no -m option was given.`, `fatal: ${kind} failed`);
+  if (cm.parents.length > 1 && !mainline) {
+    throw new GitError(`error: commit ${id} is a merge but no -m option was given.`, `fatal: ${kind} failed`, `hint: a merge has ${cm.parents.length} parents. -m 1 means "the side that was merged INTO" (usually main), so git ${kind} -m 1 ${short(id)} ${kind === 'revert' ? 'undoes everything the merge brought in' : 'copies what the merge brought in'}.`);
+  }
+  const pn = mainline ? Number(mainline) : 1;
+  if (mainline && cm.parents.length < 2) throw new GitError(`error: mainline was specified but commit ${id} is not a merge.`, `fatal: ${kind} failed`);
+  if (!(pn >= 1 && pn <= cm.parents.length)) throw new GitError(`error: commit ${id} does not have parent ${mainline}`, `fatal: ${kind} failed`);
   if (computeStatus(w).staged.length || computeStatus(w).unstaged.length) {
     throw new GitError(`error: your local changes would be overwritten by ${kind}.`, 'hint: commit your changes or stash them to proceed.', `fatal: ${kind} failed`);
   }
-  const parentTree = treeOf(w, cm.parents[0]);
+  const parentTree = treeOf(w, cm.parents[pn - 1]);
   const ours = headTree(w);
   const [base, theirs] = kind === 'cherry-pick' ? [parentTree, cm.tree] : [cm.tree, parentTree];
   const message = kind === 'cherry-pick' ? cm.message : `Revert "${firstLine(cm.message)}"\n\nThis reverts commit ${cm.id}.`;
@@ -1151,7 +1212,7 @@ function pickLike(c: Ctx, a: Args, kind: 'cherry-pick' | 'revert') {
     applyMergeResult(w, ours, theirs, res);
     r.op = { kind, commit: id, message, origHead: head };
     r.conflicts = res.conflicts;
-    res.conflicts.forEach((p) => c.out(`CONFLICT (content): Merge conflict in ${p}`));
+    res.conflicts.forEach((p) => c.out(conflictLine(p, ours, theirs, label)));
     c.err(`error: could not ${kind === 'revert' ? 'revert' : 'apply'} ${short(id)}... ${firstLine(cm.message)}`);
     c.err(`hint: After resolving the conflicts, mark them with\nhint: "git add/rm <pathspec>", then run\nhint: "git ${kind} --continue".\nhint: To abort and get back to the state before "git ${kind}",\nhint: run "git ${kind} --abort".`);
     c.ok = false;
@@ -1175,11 +1236,112 @@ function pickLike(c: Ctx, a: Args, kind: 'cherry-pick' | 'revert') {
   c.out(`[${currentBranch(w) ?? 'detached HEAD'} ${short(newId)}] ${firstLine(message)}`);
   const stat = statLines(ours, res.tree);
   if (stat.length) c.out(stat[stat.length - 1]);
-  if (kind === 'revert') {
+  if (kind === 'revert' && mainline) {
+    c.explain(`revert -m ${pn} added a NEW commit ${short(newId)} that undoes everything the merge ${short(id)} brought in (compared to parent ${pn}). The merge itself stays in history. Careful: git now thinks that branch IS merged, so merging it again later brings nothing back. To re-land it, revert this revert.`);
+  } else if (kind === 'revert') {
     c.explain(`revert added a NEW commit ${short(newId)} that undoes ${short(id)}. History isn't rewritten, so it's safe on shared branches. A normal git push works.`);
   } else {
     c.explain(`Copied the changes of ${short(id)} into a new commit ${short(newId)} on your branch. The original commit is untouched.`);
   }
+}
+
+// ─── tag ───
+
+function tag(c: Ctx, a: Args) {
+  const w = c.w;
+  const r = R(c);
+  const del = a.flag('-d', '--delete');
+  const force = a.flag('-f', '--force');
+  const list = a.flag('-l', '--list');
+  a.flag('-a', '--annotate');
+  a.opt('-m', '--message');
+  a.noUnknownFlags('tag');
+  if (list || !a.rest.length) {
+    Object.keys(r.tags).sort().forEach((t) => c.out(t));
+    return;
+  }
+  if (del) {
+    for (const t of a.rest) {
+      const id = r.tags[t];
+      if (!id) throw new GitError(`error: tag '${t}' not found.`);
+      delete r.tags[t];
+      c.out(`Deleted tag '${t}' (was ${short(id)})`);
+    }
+    c.explain(`Deleted locally only. If you already pushed it, origin still has it: git push origin --delete ${a.rest[0]}`);
+    return;
+  }
+  const [name, rev = 'HEAD'] = a.rest;
+  if (!name || /[\s~^:?*[\\]|\.\./.test(name)) throw new GitError(`fatal: '${name}' is not a valid tag name.`);
+  const id = resolveRev(w, rev);
+  const old = r.tags[name];
+  if (old && !force) throw new GitError(`fatal: tag '${name}' already exists`, `hint: move it with git tag -f ${name} ${rev}, or delete it first with git tag -d ${name}`);
+  r.tags[name] = id;
+  if (old) c.out(`Updated tag '${name}' (was ${short(old)})`);
+  c.explain(`Tag ${name} → ${short(id)} "${firstLine(w.objects[id].message)}". Unlike a branch, a tag never moves on its own. Tags are NOT pushed by git push: send it with git push origin ${name}.`);
+}
+
+// ─── clean ───
+
+function clean(c: Ctx, a: Args) {
+  const w = c.w;
+  const r = R(c);
+  const dry = a.flag('-n', '--dry-run');
+  const force = a.flag('-f', '--force');
+  const dirs = a.flag('-d');
+  const withIgnored = a.flag('-x');
+  a.noUnknownFlags('clean');
+  if (!dry && !force && cfg(w, 'clean.requireforce') !== 'false') {
+    throw new GitError('fatal: clean.requireForce is true and -f not specified: refusing to clean', 'hint: see what WOULD be deleted first: git clean -n (add -d for folders)');
+  }
+  const head = headTree(w);
+  const tracked = new Set(pathsOf(r.index, head));
+  const ignored = ignoreMatcher(w);
+  let cands = Object.keys(w.files).filter((p) => !tracked.has(p) && (withIgnored || !ignored(p)));
+  if (a.rest.length) cands = matchPaths(a.rest, cands, (x) => new GitError(`error: pathspec '${x}' did not match any untracked file`));
+  // a file inside a folder that has no tracked files is an "untracked directory" (needs -d)
+  const trackedDirs = new Set([...tracked].flatMap((p) => p.split('/').slice(0, -1).map((_, i, parts) => parts.slice(0, i + 1).join('/'))));
+  const untrackedDir = (p: string) => {
+    const parts = p.split('/');
+    for (let i = 1; i < parts.length; i++) {
+      const d = parts.slice(0, i).join('/');
+      if (!trackedDirs.has(d)) return d + '/';
+    }
+    return null;
+  };
+  const shown = new Set<string>();
+  const removed: string[] = [];
+  const skipped: string[] = [];
+  for (const p of cands.sort()) {
+    const d = untrackedDir(p);
+    if (d && !dirs) {
+      skipped.push(d);
+      continue;
+    }
+    removed.push(p);
+    const label = d ?? p;
+    if (!shown.has(label)) {
+      shown.add(label);
+      c.out(`${dry ? 'Would remove' : 'Removing'} ${label}`);
+    }
+    if (!dry) delete w.files[p];
+  }
+  if (dry) {
+    c.explain(removed.length ? `Dry run: nothing deleted yet. Happy with the list? Run it again with -f instead of -n.${[...new Set(skipped)].length ? ` Folders (${[...new Set(skipped)].join(', ')}) need -d too.` : ''}` : `Nothing would be removed.${skipped.length ? ` Untracked folders (${[...new Set(skipped)].join(', ')}) are skipped without -d.` : ''}`);
+  } else if (removed.length) {
+    c.explain(`Deleted for good: git never saved untracked files, so there's no undo.${!withIgnored ? ' Ignored files (.gitignore) were kept, -x would delete those too.' : ''}`);
+  }
+}
+
+// ─── fsck ───
+
+function fsck(c: Ctx, a: Args) {
+  a.flag('--unreachable', '--lost-found', '--no-reflog', '--full');
+  a.noUnknownFlags('fsck');
+  const r = R(c);
+  c.out('Checking object directories: 100% (256/256), done.');
+  const lost = r.lostStashes ?? [];
+  lost.forEach((s) => c.out(`dangling commit ${s.id}`));
+  c.explain(lost.length ? `Dangling commits are objects nothing points at anymore. A dropped stash shows up here: git stash show <id> previews one, git stash apply <id> brings it back.` : 'Nothing dangling. (Commits you lost from a branch are easier to find with git reflog.)');
 }
 
 // ─── stash ───
@@ -1188,6 +1350,19 @@ function stash(c: Ctx, a: Args) {
   const w = c.w;
   const r = R(c);
   const sub = a.rest[0] && !a.rest[0].startsWith('-') ? a.rest.shift()! : 'push';
+  const lose = (...entries: StashEntry[]) => (r.lostStashes = [...(r.lostStashes ?? []), ...entries]);
+  /** a stash entry by stash@{n}, n, or the sha that `stash drop` printed. i = -1 for a dropped one */
+  const pick = (): { s: StashEntry; i: number } => {
+    const ref = a.rest[0] ?? 'stash@{0}';
+    if (/^[0-9a-f]{7,40}$/.test(ref)) {
+      const live = r.stash.findIndex((x) => x.id.startsWith(ref));
+      if (live >= 0) return { s: r.stash[live], i: live };
+      const lost = (r.lostStashes ?? []).find((x) => x.id.startsWith(ref));
+      if (lost) return { s: lost, i: -1 };
+      throw new GitError(`error: '${ref}' is not a stash-like commit`);
+    }
+    return { s: r.stash[pickIndex()], i: pickIndex() };
+  };
   const pickIndex = () => {
     const ref = a.rest[0] ?? 'stash@{0}';
     const m = ref.match(/^(?:stash@\{)?(\d+)\}?$/);
@@ -1226,23 +1401,25 @@ function stash(c: Ctx, a: Args) {
       r.stash.forEach((s, i) => c.out(`stash@{${i}}: ${s.message}`));
       return;
     case 'show': {
-      const s = r.stash[pickIndex()];
+      const { s } = pick();
       statLines(treeOf(w, s.base), s.worktree).forEach((l) => c.out(l));
       return;
     }
     case 'drop': {
       const i = pickIndex();
       const [s] = r.stash.splice(i, 1);
+      lose(s);
       c.out(`Dropped stash@{${i}} (${s.id})`);
+      c.explain('Gone from git stash list. Not erased yet, though: hold on to the id in brackets.');
       return;
     }
     case 'clear':
+      lose(...r.stash);
       r.stash = [];
       return;
     case 'pop':
     case 'apply': {
-      const i = pickIndex();
-      const s = r.stash[i];
+      const { s, i } = pick();
       const baseTree = treeOf(w, s.base);
       const cur = headTree(w);
       const touched = pathsOf(baseTree, s.worktree).filter((p) => s.worktree[p] !== baseTree[p]);
@@ -1269,6 +1446,7 @@ function stash(c: Ctx, a: Args) {
       if (conflicts.length) {
         conflicts.forEach((p) => c.out(`Auto-merging ${p}\nCONFLICT (content): Merge conflict in ${p}`));
         r.conflicts = [...new Set([...r.conflicts, ...conflicts])];
+        r.stages = Object.fromEntries(conflicts.map((p) => [p, { ours: cur[p], theirs: s.worktree[p] }]));
         c.out('The stash entry is kept in case you need it again.');
         c.ok = false;
         c.explain('Your stashed edits clash with what changed since. Resolve the markers, then git add <file>. Then drop the stash yourself with git stash drop.');
@@ -1276,11 +1454,15 @@ function stash(c: Ctx, a: Args) {
       }
       const st = computeStatus(w);
       [...st.staged, ...st.unstaged].forEach((x) => c.out(`\t${x.kind}:   ${x.path}`));
-      if (sub === 'pop') {
-        r.stash.splice(i, 1);
+      if (sub === 'pop' && i >= 0) {
+        lose(...r.stash.splice(i, 1));
         c.out(`Dropped refs/stash@{${i}} (${s.id})`);
       }
-      c.explain(`Stashed changes re-applied on top of ${short(headId(w)!)}.${sub === 'apply' ? ' (apply keeps the stash entry. pop would have removed it.)' : ''}`);
+      c.explain(
+        i < 0
+          ? `Re-applied a stash that was already dropped, straight from its id. Stash entries are commits underneath, so they linger until git garbage-collects them.`
+          : `Stashed changes re-applied on top of ${short(headId(w)!)}.${sub === 'apply' ? ' (apply keeps the stash entry. pop would have removed it.)' : ''}`,
+      );
       return;
     }
     default:
@@ -1303,6 +1485,14 @@ function doFetch(c: Ctx, name = 'origin', prune = false): boolean {
     else if (isAncestor(w, old, id)) lines.push(`   ${short(old)}..${short(id)}  ${b} -> ${key}`);
     else lines.push(` + ${short(old)}...${short(id)} ${b} -> ${key}  (forced update)`);
     r.remoteBranches[key] = id;
+  }
+  for (const [t, id] of Object.entries(rem.tags ?? {})) {
+    const mine = r.tags[t];
+    if (mine === id) continue;
+    if (!mine) {
+      r.tags[t] = id;
+      lines.push(` * [new tag]         ${t} -> ${t}`);
+    } else lines.push(` ! [rejected]        ${t} -> ${t}  (would clobber existing tag)`);
   }
   for (const key of Object.keys(r.remoteBranches)) {
     if (!key.startsWith(name + '/')) continue;
@@ -1433,9 +1623,18 @@ function push(c: Ctx, a: Args) {
   const force = a.flag('-f', '--force');
   const lease = a.flag('--force-with-lease');
   const del = a.flag('-d', '--delete');
+  const pushTags = a.flag('--tags');
   a.noUnknownFlags('push');
   let [remoteName, ...refs] = a.rest;
   const br = currentBranch(w);
+  if (pushTags) {
+    remoteName ??= (br && r.upstream[br]?.split('/')[0]) || 'origin';
+    refs.push(...Object.keys(r.tags).sort().map((t) => `refs/tags/${t}`));
+    if (!refs.length) {
+      c.out('Everything up-to-date');
+      return;
+    }
+  }
   const upRef = (b: string) => {
     const up = r.upstream[b];
     return up ? `${b}:${up.slice(up.indexOf('/') + 1)}` : b;
@@ -1472,6 +1671,50 @@ function push(c: Ctx, a: Args) {
   for (const ref of refs) {
     const [src, dst] = ref.includes(':') ? ref.split(':') : [ref, ref];
     const key = `${remoteName}/${dst}`;
+    // tags: refs/tags/x, or a bare name that is a tag and not a branch
+    const tagOf = (x: string, tags: Record<string, string>, branches: Record<string, string>) =>
+      x.startsWith('refs/tags/') ? x.slice(10) : tags[x] !== undefined && branches[x] === undefined ? x : undefined;
+    const rtags = (rem.tags ??= {});
+    if (del || src === '') {
+      const dt = tagOf(dst, rtags, rem.branches);
+      if (dt !== undefined) {
+        if (!rtags[dt]) throw new GitError(`error: unable to delete '${dt}': remote ref does not exist`, `error: failed to push some refs to '${rem.url}'`);
+        delete rtags[dt];
+        out.push(` - [deleted]         ${dt}`);
+        continue;
+      }
+    } else {
+      const st = tagOf(src, r.tags, r.branches);
+      if (st !== undefined) {
+        const id = r.tags[st];
+        if (!id) throw new GitError(`error: src refspec ${src} does not match any`, `error: failed to push some refs to '${rem.url}'`);
+        const theirs = rtags[st];
+        if (theirs === id) {
+          upToDate++;
+          continue;
+        }
+        if (!theirs) out.push(` * [new tag]         ${st} -> ${st}`);
+        else if (!force) {
+          out.push(` ! [rejected]        ${st} -> ${st} (already exists)`);
+          rejected = true;
+          after.push(() => {
+            c.err(`error: failed to push some refs to '${rem.url}'`);
+            c.err('hint: Updates were rejected because the tag already exists in the remote.');
+            c.explain(`origin already has ${st} at ${short(theirs)}. Tags are supposed to never move, so git refuses. If nobody has used it yet: delete it on origin (git push origin --delete ${st}) and push again, or force it (git push --force origin ${st}).`);
+          });
+          continue;
+        } else out.push(` + ${short(theirs)}...${short(id)} ${st} -> ${st} (forced update)`);
+        rtags[st] = id;
+        continue;
+      }
+    }
+    if (rem.prOnly?.includes(dst) && !(del || src === '') && rem.branches[dst] !== (src === 'HEAD' ? headId(w) : r.branches[src])) {
+      out.push(` ! [remote rejected] ${src} -> ${dst} (protected branch hook declined)`);
+      rejected = true;
+      after.unshift(() => c.err(`remote: error: GH006: Protected branch update failed for refs/heads/${dst}.\nremote: error: Changes must be made through a pull request.`));
+      after.push(() => c.explain(`${dst} only accepts pull requests. Nothing was pushed. Put your commits on a feature branch, push that, and open a PR. Then move your local ${dst} back to origin/${dst} so it matches the server again.`));
+      continue;
+    }
     if (del || src === '') {
       if (!rem.branches[dst]) throw new GitError(`error: unable to delete '${dst}': remote ref does not exist`, `error: failed to push some refs to '${rem.url}'`);
       if (rem.protectedBranches.includes(dst)) {
@@ -1552,6 +1795,8 @@ function push(c: Ctx, a: Args) {
   if (rejected) {
     if (!out.some((l) => l.includes('[rejected]') && !l.includes('stale'))) c.err(`error: failed to push some refs to '${rem.url}'`);
     c.ok = false;
+  } else if (refs.length && refs.every((x) => x.startsWith('refs/tags/') || (r.tags[x] !== undefined && r.branches[x] === undefined)) && out.length) {
+    c.explain('origin has the tag now. Teammates get it on their next git fetch.');
   } else if (out.some((l) => l.includes('->') || l.includes('[deleted]'))) {
     c.explain(`origin is updated. Teammates get these commits on their next fetch or pull.${setUp ? ' (-u remembered origin as the upstream, so plain git push / git pull work from now on.)' : ''}`);
   }
@@ -1695,6 +1940,9 @@ const COMMANDS: Record<string, (c: Ctx, a: Args) => void> = {
   'cherry-pick': (c, a) => pickLike(c, a, 'cherry-pick'),
   revert: (c, a) => pickLike(c, a, 'revert'),
   stash,
+  tag,
+  clean,
+  fsck,
   fetch,
   pull,
   push,
@@ -1735,7 +1983,7 @@ export function runGit(c: Ctx, argv: string[], depth = 0) {
     throw new GitError('fatal: not a git repository (or any of the parent directories): .git');
   }
   let args = rest;
-  if (sub === 'commit') {
+  if (sub === 'commit' || sub === 'clean') {
     // expand combined short flags like -am
     args = rest.flatMap((x) => (/^-[a-z]{2,}$/.test(x) ? x.slice(1).split('').map((ch) => `-${ch}`) : [x]));
   }

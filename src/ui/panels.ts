@@ -68,8 +68,12 @@ export function renderRemote(w: World): string {
       const stale = connected && known !== id;
       const c = w.objects[id];
       return `<div class="remote-row"><span class="name">${esc(b)}</span><span class="sha">${short(id)}</span><span>${esc(firstLine(c.message))}</span><span class="sha">by ${esc(c.author)}</span>${
-        rem.protectedBranches.includes(b) ? '<span class="tag">protected</span>' : ''
+        rem.prOnly?.includes(b) ? '<span class="tag">PRs only</span>' : rem.protectedBranches.includes(b) ? '<span class="tag">protected</span>' : ''
       }${stale ? `<span class="tag warn" title="Your origin/${esc(b)} label is out of date. git fetch to update it">${known ? 'newer than your origin/' + esc(b) : 'not fetched yet'}</span>` : ''}</div>`;
     });
+  for (const [t, id] of Object.entries(rem.tags ?? {}).sort()) {
+    const c = w.objects[id];
+    rows.push(`<div class="remote-row"><span class="name">🏷 ${esc(t)}</span><span class="sha">${short(id)}</span><span>${esc(firstLine(c.message))}</span><span class="tag">tag</span></div>`);
+  }
   return `<div class="remote-list"><div class="remote-url">${esc(rem.url)}${connected ? '' : ' · not added as a remote yet'}</div>${rows.join('') || '<div class="empty">No branches on the server yet.</div>'}</div>`;
 }

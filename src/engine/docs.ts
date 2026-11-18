@@ -19,7 +19,7 @@ export const COMMAND_DOCS: Record<string, { summary: string; usage: string[] }> 
   rm: { summary: 'Remove a file from the working directory and the staging area.', usage: ['git rm <file>', 'git rm --cached <file>   # stop tracking but keep the file'] },
   commit: {
     summary: 'Save the staging area as a new snapshot and move your branch forward to it.',
-    usage: ['git commit -m "message"', 'git commit -am "message"   # stage tracked changes + commit', 'git commit --amend -m "better message"', 'git commit --amend --no-edit'],
+    usage: ['git commit -m "message"', 'git commit -am "message"   # stage tracked changes + commit', 'git commit --amend -m "better message"', 'git commit --amend --no-edit', 'git commit --amend --no-edit --reset-author   # use your current name/email'],
   },
   log: { summary: 'Show commit history.', usage: ['git log', 'git log --oneline', 'git log --oneline --all', 'git log main..origin/main   # commits on origin/main not on main'] },
   reflog: {
@@ -33,11 +33,11 @@ export const COMMAND_DOCS: Record<string, { summary: string; usage: string[] }> 
   switch: { summary: 'Move to another branch.', usage: ['git switch <branch>', 'git switch -c <new-branch>', 'git switch -', 'git switch --detach <commit>'] },
   checkout: {
     summary: 'The older do-everything command: switch branches, detach HEAD, or restore files.',
-    usage: ['git checkout <branch>', 'git checkout -b <new-branch>', 'git checkout <commit>      # detached HEAD', 'git checkout -- <file>     # discard changes (like git restore)'],
+    usage: ['git checkout <branch>', 'git checkout -b <new-branch>', 'git checkout <commit>      # detached HEAD', 'git checkout -- <file>     # discard changes (like git restore)', 'git checkout --ours <file>   # in a conflict: take your side', 'git checkout --theirs <file> # in a conflict: take their side'],
   },
   restore: {
     summary: 'Restore files: discard working changes, or unstage.',
-    usage: ['git restore <file>            # discard unstaged changes ⚠️', 'git restore --staged <file>   # unstage, keep changes', 'git restore --source=HEAD~1 <file>'],
+    usage: ['git restore <file>            # discard unstaged changes ⚠️', 'git restore --staged <file>   # unstage, keep changes', 'git restore --source=HEAD~1 <file>', 'git restore --ours <file>     # conflict: take one side', 'git restore --theirs <file>'],
   },
   reset: {
     summary: 'Move the current branch to another commit. The mode decides what else gets reset.',
@@ -60,12 +60,21 @@ export const COMMAND_DOCS: Record<string, { summary: string; usage: string[] }> 
   'cherry-pick': { summary: 'Copy one commit onto the current branch.', usage: ['git cherry-pick <commit>', 'git cherry-pick --continue', 'git cherry-pick --abort'] },
   revert: {
     summary: 'Create a new commit that undoes an earlier one. Safe for shared branches: no history rewrite.',
-    usage: ['git revert <commit>', 'git revert HEAD', 'git revert --continue', 'git revert --abort'],
+    usage: ['git revert <commit>', 'git revert HEAD', 'git revert -m 1 <merge-commit>   # undo a whole merge', 'git revert --continue', 'git revert --abort'],
   },
   stash: {
     summary: 'Shelve uncommitted changes so you get a clean working tree, then bring them back later.',
-    usage: ['git stash', 'git stash -u        # include untracked files', 'git stash -m "msg"', 'git stash list', 'git stash pop', 'git stash apply', 'git stash drop'],
+    usage: ['git stash', 'git stash -u        # include untracked files', 'git stash -m "msg"', 'git stash list', 'git stash pop', 'git stash apply', 'git stash drop', 'git stash apply <sha>   # bring back a dropped stash'],
   },
+  tag: {
+    summary: 'Name a commit permanently (e.g. a release). Unlike branches, tags never move by themselves.',
+    usage: ['git tag', 'git tag v1.0            # tag HEAD', 'git tag v1.0 <commit>', 'git tag -d v1.0', 'git tag -f v1.0 <commit>  # move it', 'git push origin v1.0    # tags are not pushed by default', 'git push origin --delete v1.0'],
+  },
+  clean: {
+    summary: 'Delete untracked files. There is no undo, so always dry-run first.',
+    usage: ['git clean -n      # dry run: list what would go', 'git clean -nd     # including untracked folders', 'git clean -fd     # really delete files + folders ⚠️', 'git clean -fdx    # also ignored files ⚠️'],
+  },
+  fsck: { summary: 'Check the object database. With --lost-found it lists dangling commits (e.g. dropped stashes).', usage: ['git fsck --lost-found'] },
   fetch: { summary: "Download new commits from the remote and update origin/* labels. Doesn't touch your branches or files.", usage: ['git fetch', 'git fetch --prune'] },
   pull: {
     summary: 'fetch + merge (or + rebase). Brings origin changes into your current branch.',
@@ -73,7 +82,7 @@ export const COMMAND_DOCS: Record<string, { summary: string; usage: string[] }> 
   },
   push: {
     summary: 'Upload your commits and move the branch on the remote.',
-    usage: ['git push', 'git push -u origin <branch>    # first push of a new branch', 'git push --force-with-lease    # safer force push', 'git push --force               # dangerous ⚠️', 'git push origin --delete <branch>'],
+    usage: ['git push', 'git push -u origin <branch>    # first push of a new branch', 'git push --force-with-lease    # safer force push', 'git push --force               # dangerous ⚠️', 'git push origin --delete <branch>', 'git push origin <tag>', 'git push --tags'],
   },
   remote: { summary: 'Manage remote nicknames (origin is just a name for a URL).', usage: ['git remote -v', 'git remote add origin <url>', 'git remote remove origin'] },
   diff: { summary: 'Show line changes.', usage: ['git diff               # working dir vs staging', 'git diff --staged      # staging vs last commit', 'git diff main feature'] },

@@ -8,7 +8,7 @@ const LANE_COLORS = ['#5b5bd6', '#1f9d55', '#c2410c', '#0e7490', '#a21caf', '#b4
 
 const esc = (s: string) => s.replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c]!);
 
-type Label = { text: string; kind: 'head' | 'branch' | 'remote' | 'lost' | 'stash' };
+type Label = { text: string; kind: 'head' | 'branch' | 'remote' | 'tag' | 'lost' | 'stash' };
 
 /** Draw the local commit graph as SVG: time flows left → right, one lane per branch. */
 export function renderGraph(w: World): string {
@@ -32,6 +32,7 @@ export function renderGraph(w: World): string {
   for (const b of Object.keys(r.branches).sort()) tips.push(r.branches[b]);
   for (const b of Object.keys(r.remoteBranches).sort()) tips.push(r.remoteBranches[b]);
   for (const s of r.stash) tips.push(s.base);
+  for (const t of Object.keys(r.tags ?? {}).sort()) tips.push(r.tags[t]);
   [...dangling].map((id) => w.objects[id]).sort((a, b) => b.seq - a.seq).forEach((c) => tips.push(c.id));
   const lane = new Map<string, number>();
   let lanes = 0;
@@ -53,6 +54,7 @@ export function renderGraph(w: World): string {
   if (head && !cur) add(head, { text: 'HEAD (detached)', kind: 'head' });
   for (const [b, id] of Object.entries(r.branches)) add(id, { text: b === cur ? `HEAD → ${b}` : b, kind: b === cur ? 'head' : 'branch' });
   for (const [b, id] of Object.entries(r.remoteBranches)) add(id, { text: b, kind: 'remote' });
+  for (const [t, id] of Object.entries(r.tags ?? {})) add(id, { text: `🏷 ${t}`, kind: 'tag' });
   r.stash.forEach((s, i) => add(s.base, { text: `stash@{${i}} base`, kind: 'stash' }));
   for (const id of dangling) {
     const tipOfDangling = !shown.some((c) => dangling.has(c.id) && c.parents.includes(id));
@@ -110,7 +112,7 @@ export function renderGraph(w: World): string {
   return `<svg width="${width}" height="${height}" viewBox="0 0 ${width} ${height}" role="img" aria-label="Commit graph">${edges}${nodes}</svg>`;
 }
 
-const order = (k: Label['kind']) => ({ head: 0, branch: 1, remote: 2, stash: 3, lost: 4 })[k];
+const order = (k: Label['kind']) => ({ head: 0, branch: 1, remote: 2, tag: 3, stash: 4, lost: 5 })[k];
 
 function pill(kind: Label['kind']) {
   switch (kind) {
@@ -120,6 +122,8 @@ function pill(kind: Label['kind']) {
       return { bg: 'var(--accent-soft)', fg: 'var(--accent)' };
     case 'remote':
       return { bg: 'var(--warn-soft)', fg: 'var(--remote)' };
+    case 'tag':
+      return { bg: 'var(--ok-soft)', fg: 'var(--ok)' };
     case 'stash':
       return { bg: 'var(--panel-2)', fg: 'var(--muted)' };
     case 'lost':

@@ -59,6 +59,12 @@ export interface Repo {
   conflicts: string[];
   stash: StashEntry[];
   prevBranch?: string;
+  /** tag name -> commit id */
+  tags: Record<string, string>;
+  /** during a conflict: each side's version of a conflicted file (for --ours / --theirs) */
+  stages?: Record<string, { ours?: string; theirs?: string }>;
+  /** stash entries that were dropped or popped: unreachable but still in the object store */
+  lostStashes?: StashEntry[];
 }
 
 /** The shared server everyone pushes to (e.g. GitHub). */
@@ -67,6 +73,9 @@ export interface RemoteRepo {
   branches: Record<string, string>;
   /** branches that refuse force pushes */
   protectedBranches: string[];
+  /** branches that only accept changes through a pull request (no direct pushes at all) */
+  prOnly?: string[];
+  tags?: Record<string, string>;
 }
 
 export interface World {

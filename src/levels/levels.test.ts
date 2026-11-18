@@ -120,4 +120,38 @@ describe('bad moves are caught', () => {
     const { w } = play(byId('reflog-rescue'), ['rm -rf .git']);
     expect(w.repo).toBeNull();
   });
+
+  it('revert without -m on a merge explains what -m means', () => {
+    const { log } = play(byId('revert-merge'), ['git pull', 'git revert HEAD~1']);
+    expect(log).toContain('is a merge but no -m option');
+  });
+
+  it('re-landing with a plain merge leaves the reverted file out', () => {
+    const level = byId('reland-feature');
+    const { w } = play(level, ['git merge new-checkout', 'git push']);
+    expect(level.goals[0].check(w)).toBe(false);
+  });
+
+  it('git clean -fdx also deletes the ignored .env', () => {
+    const level = byId('clean-junk');
+    const { w } = play(level, ['git clean -fdx']);
+    expect(level.goals[3].check(w)).toBe(false);
+  });
+
+  it('the --ours prelude really dropped your commit', () => {
+    const level = byId('bad-rebase-resolution');
+    const { world } = startLevel(level);
+    expect(level.goals[0].check(world)).toBe(false);
+  });
+
+  it('pushing the moved tag without force is rejected', () => {
+    const { log } = play(byId('wrong-tag'), ['git tag -f v2.0', 'git push origin v2.0']);
+    expect(log).toContain('(already exists)');
+  });
+
+  it('force-pushing to a PR-only main is still rejected', () => {
+    const { log } = play(byId('pr-only'), ['git push --force']);
+    expect(log).toContain('pull request');
+  });
 });
+

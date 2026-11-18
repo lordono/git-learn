@@ -159,6 +159,7 @@ export function reachable(w: World): Set<string> {
     ...Object.values(r.branches),
     ...Object.values(r.remoteBranches),
     ...r.stash.map((s) => s.base),
+    ...Object.values(r.tags ?? {}),
   ];
   const h = headId(w);
   if (h) tips.push(h);
@@ -248,6 +249,8 @@ export function resolveRev(w: World, rev: string): string {
     id = r.branches[base.replace(/^refs\/heads\//, '')];
   } else if (r.remoteBranches[base.replace(/^(refs\/)?remotes\//, '')]) {
     id = r.remoteBranches[base.replace(/^(refs\/)?remotes\//, '')];
+  } else if (r.tags?.[base.replace(/^(refs\/)?tags\//, '')]) {
+    id = r.tags[base.replace(/^(refs\/)?tags\//, '')];
   } else if (/^[0-9a-f]{4,40}$/.test(base)) {
     const hits = Object.keys(w.objects).filter((k) => k.startsWith(base));
     if (hits.length > 1) throw new GitError(`error: short object ID ${base} is ambiguous`);
@@ -268,6 +271,7 @@ export function decorations(w: World): Map<string, string[]> {
   if (h && !cur) add(h, 'HEAD');
   for (const [b, id] of Object.entries(r.branches)) add(id, b === cur ? `HEAD -> ${b}` : b);
   for (const [b, id] of Object.entries(r.remoteBranches)) add(id, b);
+  for (const [t, id] of Object.entries(r.tags ?? {})) add(id, `tag: ${t}`);
   for (const [id, labels] of map) {
     map.set(id, labels.sort((a, b) => Number(b.startsWith('HEAD')) - Number(a.startsWith('HEAD'))));
   }
@@ -294,6 +298,7 @@ export function newRepo(defaultBranch: string): Repo {
     upstream: {},
     conflicts: [],
     stash: [],
+    tags: {},
   };
 }
 
