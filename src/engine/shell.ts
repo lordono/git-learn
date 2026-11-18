@@ -1,4 +1,4 @@
-import { runGit } from './git';
+import { finishEdit, runGit } from './git';
 import { Ctx, GitError, clone, firstLine, pathsOf, plural, reachable, short } from './repo';
 import type { Line, World } from './types';
 
@@ -217,6 +217,22 @@ function safetyNotes(before: World, after: World, c: Ctx) {
     const list = lost.slice(0, 3).map((cm) => `${short(cm.id)} "${firstLine(cm.message)}"`).join(', ');
     c.explain(`${plural(lost.length, 'commit')} no longer on any branch: ${list}${lost.length > 3 ? ', …' : ''}. Not deleted! git reflog lists them, and git branch <name> ${short(lost[0].id)} saves them.`);
   }
+}
+
+/** The learner saved (or closed) the editor git opened: hand the text back to git. Never throws. */
+export function saveEditor(world: World, text: string): RunResult {
+  const next = clone(world);
+  const c = new Ctx(next);
+  try {
+    finishEdit(c, text);
+    safetyNotes(world, next, c);
+  } catch (e) {
+    if (e instanceof GitError) e.lines.forEach((l) => c.err(l));
+    else c.err(`simulator bug: ${(e as Error).message}`);
+    return { world, lines: c.lines, ok: false, actions: [] };
+  }
+  const lines = c.lines.flatMap((l) => (l.kind === 'out' && l.text.includes('\n') ? l.text.split('\n').map((t) => ({ kind: 'out' as const, text: t })) : [l]));
+  return { world: next, lines, ok: c.ok, actions: [] };
 }
 
 /** Run one line typed into the terminal. Never throws. */

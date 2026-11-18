@@ -126,3 +126,14 @@ export function firstParentChain(w: World, tip: string | undefined): string[] {
 
 export const isLinear = (w: World, tip: string | undefined) =>
   !!tip && [...ancestors(w, tip)].every((id) => w.objects[id].parents.length <= 1);
+
+/** A rebase todo list that names commits by message (resolved to short ids in world `w`). */
+export function todoFor(w: World, steps: [string, string][]): string {
+  return steps
+    .map(([cmd, msg]) => {
+      const c = Object.values(w.objects).find((x) => x.message === msg);
+      if (!c) throw new Error(`todoFor: no commit "${msg}"`);
+      return `${cmd} ${c.id.slice(0, 7)} ${msg}`;
+    })
+    .join('\n');
+}

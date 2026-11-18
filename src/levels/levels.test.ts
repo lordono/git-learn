@@ -1,7 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { LEVELS, type Level } from './levels';
-import { fireEvents, isSolved, startLevel } from './runtime';
-import { runLine } from '../engine/shell';
+import { fireEvents, isSolved, runStep, startLevel } from './runtime';
 import type { World } from '../engine/types';
 
 /** Play commands the way the UI does: run, then fire level events. */
@@ -10,7 +9,7 @@ function play(level: Level, lines: string[], start?: World) {
   const fired = new Set<string>();
   const log: string[] = [];
   for (const l of lines) {
-    const r = runLine(w, l);
+    const r = runStep(w, l);
     log.push(`$ ${l}`, ...r.lines.map((x) => `  [${x.kind}] ${x.text}`));
     const ev = fireEvents(level, r.world, l, fired);
     ev.messages.forEach((m) => log.push(`  [event] ${m}`));
@@ -44,7 +43,7 @@ describe.each(LEVELS.map((l) => [l.id, l] as const))('level %s', (_id, level) =>
     const fired = new Set<string>();
     let w = startLevel(level).world;
     for (const l of level.solution) {
-      w = fireEvents(level, runLine(w, l).world, l, fired).world;
+      w = fireEvents(level, runStep(w, l).world, l, fired).world;
     }
     expect([...fired].sort()).toEqual((level.events ?? []).map((e) => e.id).sort());
   });
@@ -152,6 +151,18 @@ describe('bad moves are caught', () => {
   it('force-pushing to a PR-only main is still rejected', () => {
     const { log } = play(byId('pr-only'), ['git push --force']);
     expect(log).toContain('pull request');
+  });
+
+  it('after rebase -i, a plain push of the rewritten branch is rejected', () => {
+    const level = byId('rebase-i-cleanup');
+    const { log } = play(level, [...level.solution.slice(0, 2), 'git push']);
+    expect(log).toContain('non-fast-forward');
+  });
+
+  it('reverting the debug commit instead of dropping it fails the level', () => {
+    const level = byId('rebase-i-drop');
+    const { w } = play(level, ['git revert HEAD~1 --no-edit']);
+    expect(level.goals[0].check(w)).toBe(false);
   });
 });
 

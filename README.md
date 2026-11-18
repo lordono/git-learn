@@ -2,7 +2,7 @@
 
 Learn git by typing real commands in a sandbox where every mistake can be undone.
 
-37 levels in three chapters (Basics, Undo & rescue, Team life). Each level drops you into a situation (normal workflow, or a mess you made, or a mess a teammate made) and checks the repository's final state. Next to the terminal you can watch the commit graph, the three trees (working dir / staging / HEAD), and the server (`origin`) change as you type.
+41 levels in four chapters (Basics, Undo & rescue, Team life, Rewriting history). Each level drops you into a situation (normal workflow, or a mess you made, or a mess a teammate made) and checks the repository's final state. Next to the terminal you can watch the commit graph, the three trees (working dir / staging / HEAD), and the server (`origin`) change as you type.
 
 ```bash
 npm install
@@ -12,7 +12,7 @@ npm test        # engine tests + runs every level's solution
 
 ## How it works
 
-- `src/engine/`: a git simulator in TypeScript. It is not real git: it models commits, branches, HEAD, the index, the reflog, stash, merge/rebase/cherry-pick/revert with real line-level conflicts, tags, `clean`, `--ours/--theirs`, `revert -m`, and a fake remote with push rejection, `--force-with-lease`, protected and pull-request-only branches. Output mimics real git, plus 💡 explanations and ⚠️ warnings (e.g. "these uncommitted changes can't be recovered").
+- `src/engine/`: a git simulator in TypeScript. It is not real git: it models commits, branches, HEAD, the index, the reflog, stash, merge/rebase/cherry-pick/revert with real line-level conflicts, interactive rebase (the todo list and commit messages open in a sandbox editor), tags, `clean`, `--ours/--theirs`, `revert -m`, and a fake remote with push rejection, `--force-with-lease`, protected and pull-request-only branches. Output mimics real git, plus 💡 explanations and ⚠️ warnings (e.g. "these uncommitted changes can't be recovered").
 - `src/engine/shell.ts`: a tiny shell (`ls`, `cat`, `echo > file`, `nano`, `rm`, `&&`).
 - `src/levels/`: levels are built by running real commands (`Scenario`), and teammates push via `teammatePush`.
 - `src/ui/`: terminal, SVG commit graph, panels. Vanilla TS, no framework.

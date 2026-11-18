@@ -9,7 +9,10 @@ export function promptParts(w: World): { dir: string; branch: string } {
   const br = currentBranch(w);
   let label = br ?? (headId(w) ? short(headId(w)!) : '?');
   const op = r.op;
-  if (op?.kind === 'rebase') label = `${op.branch ?? label}|REBASING`;
+  if (op?.kind === 'rebase') {
+    const progress = op.total ? ` ${op.total - op.todo.length}/${op.total}` : '';
+    label = `${op.branch ?? label}|${op.interactive ? 'REBASE-i' : 'REBASING'}${progress}`;
+  }
   else if (op?.kind === 'merge') label += '|MERGING';
   else if (op?.kind === 'cherry-pick') label += '|CHERRY-PICKING';
   else if (op?.kind === 'revert') label += '|REVERTING';
@@ -28,11 +31,11 @@ export function cmdHtml(cmd: string, w: World): string {
 const SHELL_CMDS = ['git', 'ls', 'cat', 'echo', 'nano', 'touch', 'rm', 'mv', 'clear', 'hint', 'help'];
 const GIT_FLAGS: Record<string, string[]> = {
   reset: ['--soft', '--mixed', '--hard'],
-  rebase: ['--continue', '--abort', '--skip'],
+  rebase: ['-i', '--continue', '--abort', '--skip', '--edit-todo'],
   merge: ['--abort', '--continue', '--no-ff', '--ff-only'],
   pull: ['--rebase', '--no-rebase', '--ff-only'],
   push: ['--force-with-lease', '--force', '--set-upstream', '--delete'],
-  commit: ['--amend', '--no-edit'],
+  commit: ['--amend', '--no-edit', '--reset-author'],
   restore: ['--staged', '--source='],
   log: ['--oneline', '--all', '--graph'],
   stash: ['pop', 'list', 'apply', 'drop', 'push', 'show'],

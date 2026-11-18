@@ -55,7 +55,7 @@ export const COMMAND_DOCS: Record<string, { summary: string; usage: string[] }> 
   },
   rebase: {
     summary: 'Replay your commits on top of another commit, producing new commits and a linear history.',
-    usage: ['git rebase <branch>', 'git rebase --continue   # after fixing a conflict + git add', 'git rebase --skip', 'git rebase --abort      # put everything back'],
+    usage: ['git rebase <branch>', 'git rebase -i HEAD~3    # edit the last 3 commits: squash, reword, reorder, drop', 'git rebase -i main      # everything since main', 'git rebase --continue   # after fixing a conflict + git add', 'git rebase --skip', 'git rebase --edit-todo  # change the rest of the plan', 'git rebase --abort      # put everything back'],
   },
   'cherry-pick': { summary: 'Copy one commit onto the current branch.', usage: ['git cherry-pick <commit>', 'git cherry-pick --continue', 'git cherry-pick --abort'] },
   revert: {

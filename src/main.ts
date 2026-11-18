@@ -1,9 +1,9 @@
 import './style.css';
-import { runLine } from './engine/shell';
+import { runLine, saveEditor } from './engine/shell';
 import { clone } from './engine/repo';
 import type { Line, World } from './engine/types';
 import { LEVELS, type Level } from './levels/levels';
-import { fireEvents, isSolved, safeCheck, startLevel } from './levels/runtime';
+import { EDITOR, fireEvents, isSolved, safeCheck, startLevel } from './levels/runtime';
 import { renderGraph } from './ui/graph';
 import { esc, renderRemote, renderTrees } from './ui/panels';
 import { cmdHtml, complete, lineHtml, promptParts } from './ui/terminal';
@@ -133,7 +133,10 @@ function renderBrief() {
     <ul class="goals">${goals.join('')}</ul>
     ${S.solved ? `<div class="win"><h4>🎉 Level complete</h4><p>${esc(l.lesson)}</p>${next ? `<button class="btn primary" id="nextBtn">Next: ${esc(next.title)} →</button>` : '<p><b>You finished every level!</b> More scenarios are coming.</p>'}</div>` : ''}
     <div class="hints">${hints.join('')}</div>
-    ${S.showSolution ? `<div class="solution">${l.solution.map((c) => '$ ' + esc(c)).join('\n')}</div>` : ''}`;
+    ${S.showSolution ? `<div class="solution">${l.solution
+      .map((c) => (c.startsWith(EDITOR) ? `✎ in the editor, save:\n${c.slice(EDITOR.length).replace(/^/gm, '    ')}` : '$ ' + c))
+      .map(esc)
+      .join('\n')}</div>` : ''}`;
   $('nextBtn')?.addEventListener('click', () => loadLevel(idx + 1));
   $<HTMLButtonElement>('hintBtn').disabled = S.hintsShown >= l.hints.length;
   $<HTMLButtonElement>('rewindBtn').disabled = S.history.length === 0;
@@ -186,6 +189,7 @@ function loadLevel(i: number) {
   renderState();
   input.focus({ preventScroll: true });
   scrollTerm();
+  openGitEditorIfWaiting();
 }
 
 function commitWorld(next: World) {
@@ -225,6 +229,7 @@ function runCommand(raw: string) {
     if (a.type === 'edit') openEditor(a.path);
   }
   afterChange(line);
+  openGitEditorIfWaiting();
 }
 
 function showHint() {
@@ -245,9 +250,79 @@ function rewind() {
   S.solved = isSolved(S.level, S.world);
   renderState();
   scrollTerm();
+  openGitEditorIfWaiting();
 }
 
 // ───── editor modal ─────
+let gitEditorOpen = false;
+
+/** git (rebase -i, reword, squash, commit without -m) is waiting for $EDITOR: show it */
+function openGitEditorIfWaiting() {
+  const pe = S.world.repo?.pendingEdit;
+  if (!pe || gitEditorOpen) return;
+  gitEditorOpen = true;
+  const isTodo = pe.purpose === 'todo';
+  const back = document.createElement('div');
+  back.className = 'modal-back';
+  back.innerHTML = `<div class="modal" role="dialog" aria-label="Edit ${esc(pe.file)}">
+    <div class="panel-head"><h3>nano · ${esc(pe.file)}</h3><span class="tag accent">git is waiting</span></div>
+    ${
+      isTodo
+        ? `<div class="todo-help">Change <code>pick</code> to: <button class="chip" data-cmd="reword">reword</button><button class="chip" data-cmd="edit">edit</button><button class="chip" data-cmd="squash">squash</button><button class="chip" data-cmd="fixup">fixup</button><button class="chip" data-cmd="drop">drop</button><button class="chip" data-cmd="pick">pick</button> <span>(click a line first) · reorder by moving lines · runs top to bottom</span></div>`
+        : `<div class="todo-help">Lines starting with <code>#</code> are ignored. An empty message aborts.</div>`
+    }
+    <textarea spellcheck="false"></textarea>
+    <div class="foot"><span><kbd>Ctrl/⌘ S</kbd> save &amp; close · <kbd>Esc</kbd> close without changes</span><span><button class="btn" data-x="cancel">Close without changes</button> <button class="btn primary" data-x="save">Save &amp; close</button></span></div>
+  </div>`;
+  const ta = back.querySelector('textarea')!;
+  ta.value = pe.text;
+  const finish = (text: string) => {
+    back.remove();
+    gitEditorOpen = false;
+    print([{ kind: 'info', text: `(editor closed: ${pe.file})` }]);
+    const res = saveEditor(S.world, text);
+    print(res.lines);
+    if (res.world !== S.world) commitWorld(res.world);
+    afterChange('(editor)');
+    input.focus();
+    openGitEditorIfWaiting();
+  };
+  /** replace the command word on the line under the cursor */
+  const setCmd = (cmd: string) => {
+    const pos = ta.selectionStart;
+    const start = ta.value.lastIndexOf('\n', pos - 1) + 1;
+    let end = ta.value.indexOf('\n', pos);
+    if (end < 0) end = ta.value.length;
+    const line = ta.value.slice(start, end);
+    if (!line.trim() || line.startsWith('#')) return;
+    const next = line.replace(/^\s*\S+/, cmd);
+    ta.value = ta.value.slice(0, start) + next + ta.value.slice(end);
+    // move to the next line so several lines can be changed quickly
+    const after = ta.value.indexOf('\n', start) + 1 || ta.value.length;
+    ta.focus();
+    ta.setSelectionRange(after, after);
+  };
+  back.addEventListener('mousedown', (e) => {
+    if ((e.target as HTMLElement).dataset.cmd) e.preventDefault(); // keep the textarea cursor
+  });
+  back.addEventListener('click', (e) => {
+    const el = e.target as HTMLElement;
+    if (el.dataset.cmd) setCmd(el.dataset.cmd);
+    if (el.dataset.x === 'save') finish(ta.value);
+    if (el.dataset.x === 'cancel') finish(pe.text);
+  });
+  ta.addEventListener('keydown', (e) => {
+    if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 's') {
+      e.preventDefault();
+      finish(ta.value);
+    }
+    if (e.key === 'Escape') finish(pe.text);
+  });
+  document.body.appendChild(back);
+  ta.focus();
+  ta.setSelectionRange(0, 0);
+}
+
 function openEditor(path: string) {
   const back = document.createElement('div');
   back.className = 'modal-back';

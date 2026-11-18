@@ -2,7 +2,7 @@
 
 Levels already playable are marked ✅. The rest are ideas. **Engine** says whether the simulator can already run the scenario (🟢 ready, just write the level) or needs a new feature (🟡, named in the cell).
 
-Each level = a `setup()` that builds the world with real commands, an optional `prelude` (commands "you already typed", replayed in the terminal so the learner sees how the mess happened), optional `events` (teammates pushing mid-level), plus `goals` (checks on the final state), `hints`, `solution` and a one-paragraph `lesson`. Levels live in `src/levels/basics.ts`, `undo.ts`, `team.ts` and `pack2.ts` (the levels that use tags, `clean`, `--ours/--theirs`, `revert -m` and friends). Every level's solution is run by `npm test`.
+Each level = a `setup()` that builds the world with real commands, an optional `prelude` (commands "you already typed", replayed in the terminal so the learner sees how the mess happened), optional `events` (teammates pushing mid-level), plus `goals` (checks on the final state), `hints`, `solution` and a one-paragraph `lesson`. Levels live in `src/levels/basics.ts`, `undo.ts`, `team.ts`, `pack2.ts` (the levels that use tags, `clean`, `--ours/--theirs`, `revert -m` and friends) and `history.ts` (interactive rebase). A solution step that starts with `✎ ` is text saved in the editor git opened (rebase todo or commit message), not a terminal command. Every level's solution is run by `npm test`.
 
 ---
 
@@ -73,7 +73,22 @@ Each level = a `setup()` that builds the world with real commands, an optional `
 | ✅ | **Tagged the wrong commit for a release** | `tag -f`, `push --force origin <tag>` (or `--delete` + push) | 🟢 |
 | ✅ | **Live teammate**: Alex pushes *while* you're resolving a conflict | `push` rejected again → second pull; teaches "integrate, then push quickly" | 🟢 (level `events`) |
 
-## 4. Boss levels (chain several skills)
+## 4. Rewriting history (interactive rebase)
+
+`git rebase -i` opens the todo list in the sandbox editor (with one-click pick / reword / edit / squash / fixup / drop buttons); reword and squash open a second editor for the message, and `edit` stops the rebase. Plain `git commit` without `-m` opens the editor too.
+
+| # | Scenario | What the learner does | Engine |
+|---|---|---|---|
+| ✅ | **Clean up a pushed PR branch** | `rebase -i main` with `fixup`, then `push --force-with-lease` | 🟢 |
+| ✅ | **Rename a commit from 2 commits ago** | `rebase -i HEAD~3`, `reword` | 🟢 |
+| ✅ | **Drop a debug commit that dumps secrets** (before pushing) | `rebase -i main`, `drop` (vs `revert`, which keeps it in history) | 🟢 |
+| ✅ | **Split one commit into two** | `edit` → `reset HEAD~1` → two commits → `rebase --continue` | 🟢 |
+| | **Reorder commits so a fix lands before the feature that needs it** | move lines in the todo | 🟢 |
+| | **Squash with a conflict in the middle** | resolve, `add`, `--continue`, then write the combined message | 🟢 |
+| | **Oops, squashed the wrong commits** | `reset --hard ORIG_HEAD` (or reflog) and redo | 🟢 |
+| | **`fixup!` commits + `--autosquash`** | `commit --fixup <sha>`, `rebase -i --autosquash` | 🟡 `--fixup`, `--autosquash` |
+
+## 5. Boss levels (chain several skills)
 
 - **Friday 5pm**: wrong branch + unpushed secret + teammate pushed meanwhile.
 - **The rebase from hell**: a 4-commit rebase with 2 conflicts; abort, then redo it with `merge` instead.
@@ -82,11 +97,11 @@ Each level = a `setup()` that builds the world with real commands, an optional `
 
 ## Engine backlog (unlocks 🟡 levels)
 
-Done: `revert -m`, `--ours/--theirs`, modify/delete conflicts, `tag`, `clean`, `fsck --lost-found`, `stash apply <sha>`, `commit --reset-author`, pull-request-only branches.
+Done: `rebase -i` (todo editor, reword/edit/squash/fixup/drop, `--edit-todo`), `git commit` without `-m` opens the editor, `revert -m`, `--ours/--theirs`, modify/delete conflicts, `tag`, `clean`, `fsck --lost-found`, `stash apply <sha>`, `commit --reset-author`, pull-request-only branches.
 
-1. `rebase -i` with a click-to-edit todo list (pick / squash / reword / drop)
-2. `blame`, `bisect`, `clone`, multiple remotes (`upstream` for forks)
-3. `git diff` during a conflict (combined view)
+1. `blame`, `bisect`, `clone`, multiple remotes (`upstream` for forks)
+2. `git diff` during a conflict (combined view)
+3. `commit --fixup` + `rebase -i --autosquash`, `rebase --onto`
 
 ## Glossary of confusing flag pairs (good for a cheat-sheet page)
 

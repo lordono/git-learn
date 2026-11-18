@@ -27,7 +27,7 @@ import {
   treeOf,
   tryResolve,
 } from './repo';
-import type { Commit, FileMap, RemoteRepo, StashEntry, World } from './types';
+import type { Commit, FileMap, PendingEdit, RemoteRepo, StashEntry, TodoCmd, TodoStep, World } from './types';
 import { carryTo, computeStatus, hardReset, ignoreMatcher, matchPaths, statLines } from './worktree';
 
 // ───────────────────────────── argument helper ─────────────────────────────
@@ -464,8 +464,20 @@ function commit(c: Ctx, a: Args) {
     parents = [head!];
     message ||= op.message;
   } else parents = head ? [head] : [];
-  if (!message) {
-    throw new GitError('error: no commit message given (the simulator has no text editor)', 'hint: git commit -m "describe what you changed"');
+  if (!message && !(amend && op?.kind === 'rebase')) {
+    if (sameTree(r.index, headTree(w)) && !allowEmpty) {
+      // fall through to "nothing to commit" below
+    } else {
+      const st = computeStatus(w);
+      openEditor(
+        c,
+        MSG_FILE,
+        `\n# Please enter the commit message for your changes. Lines starting\n# with '#' will be ignored, and an empty message aborts the commit.\n#\n# Changes to be committed:\n${st.staged.map((x) => `#\t${x.kind}:   ${x.path}`).join('\n')}\n#\n`,
+        'commit',
+      );
+      c.explain('No -m, so git opened your editor for the message. Write it on the first line and save. (git commit -m "..." skips the editor.)');
+      return;
+    }
   }
   if (!amend && !allowEmpty && op?.kind !== 'merge' && sameTree(r.index, headTree(w))) {
     const st = computeStatus(w);
@@ -1033,12 +1045,50 @@ function merge(c: Ctx, a: Args) {
 
 // ─── rebase ───
 
-function startRebase(c: Ctx, upstream: string, ontoName: string, prefix = 'rebase') {
+const TODO_FILE = '.git/rebase-merge/git-rebase-todo';
+const MSG_FILE = '.git/COMMIT_EDITMSG';
+const WAITING = 'hint: Waiting for your editor to close the file...';
+
+const TODO_HELP = `
+# Commands:
+# p, pick <commit> = use commit
+# r, reword <commit> = use commit, but edit the commit message
+# e, edit <commit> = use commit, but stop for amending
+# s, squash <commit> = use commit, but meld into previous commit
+# f, fixup <commit> = like "squash" but keep only the previous
+#                     commit's log message
+# d, drop <commit> = remove commit
+#
+# These lines can be re-ordered; they are executed from top to bottom.
+#
+# If you remove a line here THAT COMMIT WILL BE LOST.
+#
+# However, if you remove everything, the rebase will be aborted.
+#`;
+
+const CMD_ALIASES: Record<string, TodoCmd> = { p: 'pick', pick: 'pick', r: 'reword', reword: 'reword', e: 'edit', edit: 'edit', s: 'squash', squash: 'squash', f: 'fixup', fixup: 'fixup', d: 'drop', drop: 'drop' };
+
+/** remove # comment lines and surrounding blank lines, like git does with a commit message */
+export function stripComments(text: string): string {
+  return text
+    .split('\n')
+    .filter((l) => !l.startsWith('#'))
+    .join('\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+}
+
+function openEditor(c: Ctx, file: string, text: string, purpose: PendingEdit['purpose']) {
+  R(c).pendingEdit = { file, text, purpose };
+  c.out(WAITING);
+}
+
+function startRebase(c: Ctx, upstream: string, ontoName: string, prefix = 'rebase', interactive = false) {
   const w = c.w;
   const r = R(c);
   const head = needHead(c);
   const br = currentBranch(w);
-  if (isAncestor(w, upstream, head)) {
+  if (!interactive && isAncestor(w, upstream, head)) {
     c.out(`Current branch ${br ?? 'HEAD'} is up to date.`);
     return;
   }
@@ -1046,16 +1096,162 @@ function startRebase(c: Ctx, upstream: string, ontoName: string, prefix = 'rebas
   if (st.staged.length || st.unstaged.length) {
     throw new GitError('error: cannot rebase: You have unstaged changes.', 'error: Please commit or stash them.');
   }
-  const todo = exclusive(w, head, upstream)
+  const commits = exclusive(w, head, upstream)
     .filter((cm) => cm.parents.length === 1)
-    .reverse()
-    .map((cm) => cm.id);
-  r.origHead = head;
-  r.op = { kind: 'rebase', onto: upstream, ontoName, origHead: head, branch: br, todo, current: null };
-  hardReset(w, treeOf(w, upstream));
-  r.head = { kind: 'detached', id: upstream };
-  r.reflog.push({ id: upstream, msg: `${prefix} (start): checkout ${ontoName}` });
+    .reverse();
+  r.op = { kind: 'rebase', onto: upstream, ontoName, origHead: head, branch: br, todo: [], current: null };
+  if (interactive) {
+    const lines = commits.length ? commits.map((cm) => `pick ${short(cm.id)} ${firstLine(cm.message)}`) : ['noop'];
+    const text = `${lines.join('\n')}\n\n# Rebase ${short(upstream)}..${short(head)} onto ${short(upstream)} (${plural(commits.length, 'command')})${TODO_HELP}\n`;
+    r.op.interactive = true;
+    r.op.todoText = text;
+    openEditor(c, TODO_FILE, text, 'todo');
+    c.explain('Your editor opened the todo list: one line per commit, oldest at the top. Change "pick" to squash / fixup / reword / edit / drop, or reorder lines. Save to start the rebase.');
+    return;
+  }
+  beginReplay(c, commits.map((cm) => ({ cmd: 'pick', id: cm.id })), prefix);
+}
+
+/** move HEAD to the base and start replaying `todo` */
+function beginReplay(c: Ctx, todo: TodoStep[], prefix = 'rebase') {
+  const w = c.w;
+  const r = R(c);
+  const op = r.op;
+  if (op?.kind !== 'rebase') return;
+  op.todo = todo;
+  op.total = todo.length;
+  r.origHead = op.origHead;
+  hardReset(w, treeOf(w, op.onto));
+  r.head = { kind: 'detached', id: op.onto };
+  r.reflog.push({ id: op.onto, msg: `${prefix} (start): checkout ${op.ontoName}` });
   runRebase(c);
+}
+
+/** parse a saved todo list; null (and errors printed) when it is invalid */
+function parseTodo(c: Ctx, text: string, started: boolean): TodoStep[] | null {
+  const steps: TodoStep[] = [];
+  const errors: string[] = [];
+  text.split('\n').forEach((raw, i) => {
+    const line = raw.trim();
+    if (!line || line.startsWith('#') || line === 'noop') return;
+    const [word, sha] = line.split(/\s+/);
+    const cmd = CMD_ALIASES[word];
+    if (!cmd) {
+      errors.push(`error: invalid command '${word}'`, `error: invalid line ${i + 1}: ${line}`);
+      return;
+    }
+    const id = sha ? tryResolve(c.w, sha) : null;
+    if (!id) {
+      errors.push(`error: invalid line ${i + 1}: ${line}`);
+      return;
+    }
+    steps.push({ cmd, id });
+  });
+  const firstKept = steps.find((s) => s.cmd !== 'drop');
+  if (!started && firstKept && (firstKept.cmd === 'squash' || firstKept.cmd === 'fixup')) {
+    errors.push(`error: cannot '${firstKept.cmd}' without a previous commit`);
+  }
+  if (errors.length) {
+    errors.forEach((e) => c.err(e));
+    c.err("You can fix this with 'git rebase --edit-todo' and then run 'git rebase --continue'.\nOr you can abort the rebase with 'git rebase --abort'.");
+    c.ok = false;
+    return null;
+  }
+  return steps;
+}
+
+function applyTodo(c: Ctx, text: string) {
+  const r = R(c);
+  const op = r.op;
+  if (op?.kind !== 'rebase') return;
+  op.todoText = text;
+  const steps = parseTodo(c, text, op.total !== undefined);
+  if (!steps) {
+    op.needsTodo = true;
+    return;
+  }
+  op.needsTodo = false;
+  if (!steps.length && op.total === undefined) {
+    r.op = undefined;
+    c.err('error: nothing to do');
+    c.explain('You emptied the todo list, so the rebase was cancelled. Nothing changed.');
+    return;
+  }
+  const removed = exclusive(c.w, op.origHead, op.onto).filter((cm) => cm.parents.length === 1 && !steps.some((s) => s.id === cm.id));
+  if (op.total !== undefined) {
+    // --edit-todo in the middle of a rebase: just replace what's left
+    op.todo = steps;
+    c.explain('Todo list updated. Carry on with git rebase --continue.');
+    return;
+  }
+  beginReplay(c, steps);
+  if (removed.length) {
+    c.explain(`${plural(removed.length, 'commit')} had no line in the todo list, so ${removed.length === 1 ? 'it was' : 'they were'} dropped: ${removed.map((cm) => `${short(cm.id)} "${firstLine(cm.message)}"`).join(', ')}.`);
+  }
+}
+
+/** HEAD's replacement: same parents and author, new tree and/or message */
+function replaceHead(c: Ctx, tree: FileMap, message: string, reflogMsg: string): string {
+  const w = c.w;
+  const h = w.objects[headId(w)!];
+  const id = createCommit(w, { parents: h.parents, message, tree, author: { name: h.author, email: h.email } });
+  moveHead(w, id, reflogMsg);
+  return id;
+}
+
+/** make the commit for one todo step from `tree` (already in the working tree) */
+function commitStep(c: Ctx, step: TodoStep, tree: FileMap) {
+  const w = c.w;
+  const op = R(c).op;
+  if (op?.kind !== 'rebase') return;
+  const cm = w.objects[step.id];
+  if (step.cmd === 'squash' || step.cmd === 'fixup') {
+    const h = w.objects[headId(w)!];
+    op.squash ??= { msgs: [h.message], edit: false };
+    if (step.cmd === 'squash') {
+      op.squash.msgs.push(cm.message);
+      op.squash.edit = true;
+    }
+    replaceHead(c, tree, op.squash.msgs.join('\n\n'), `rebase (${step.cmd}): ${firstLine(op.squash.msgs[0])}`);
+    return;
+  }
+  const id = createCommit(w, { parents: [headId(w)!], message: cm.message, tree, author: { name: cm.author, email: cm.email } });
+  moveHead(w, id, `rebase (${step.cmd}): ${firstLine(cm.message)}`);
+}
+
+/** after a step's commit exists: maybe pause for an editor or an `edit` stop. false = paused */
+function afterStep(c: Ctx, step: TodoStep): boolean {
+  const w = c.w;
+  const op = R(c).op;
+  if (op?.kind !== 'rebase') return true;
+  const head = w.objects[headId(w)!];
+  if (step.cmd === 'reword') {
+    openEditor(c, MSG_FILE, `${head.message}\n\n# Please enter the commit message for your changes. Lines starting\n# with '#' will be ignored, and an empty message aborts the commit.\n#\n# interactive rebase in progress; onto ${short(op.onto)}\n`, 'reword');
+    return false;
+  }
+  if (step.cmd === 'edit') {
+    op.stopped = true;
+    c.out(`Stopped at ${short(head.id)}...  ${firstLine(head.message)}`);
+    c.out('You can amend the commit now, with\n\n  git commit --amend \n\nOnce you are satisfied with your changes, run\n\n  git rebase --continue');
+    c.explain(`Paused with HEAD at "${firstLine(head.message)}". Change files, git add them, git commit --amend, then git rebase --continue. (You can also make extra commits here to split it up.)`);
+    return false;
+  }
+  if ((step.cmd === 'squash' || step.cmd === 'fixup') && op.squash) {
+    const next = op.todo[0];
+    if (next && (next.cmd === 'squash' || next.cmd === 'fixup')) return true;
+    const sq = op.squash;
+    if (!sq.edit) {
+      op.squash = undefined;
+      return true;
+    }
+    const n = sq.msgs.length;
+    const ord = (i: number) => (i === 1 ? '1st' : i === 2 ? '2nd' : i === 3 ? '3rd' : `${i}th`);
+    const body = sq.msgs.map((m, i) => `# ${i === 0 ? `This is the ${ord(1)} commit message:` : `This is the commit message #${i + 1}:`}\n\n${m}`).join('\n\n');
+    openEditor(c, MSG_FILE, `# This is a combination of ${n} commits.\n${body}\n\n# Please enter the commit message for your changes. Lines starting\n# with '#' will be ignored, and an empty message aborts the commit.\n`, 'squash');
+    c.explain(`${n} commits were melded into one. Write the final message in the editor: delete the lines you don't want, keep or rewrite the rest.`);
+    return false;
+  }
+  return true;
 }
 
 function runRebase(c: Ctx) {
@@ -1064,34 +1260,44 @@ function runRebase(c: Ctx) {
   const op = r.op;
   if (op?.kind !== 'rebase') return;
   while (op.todo.length) {
-    const cid = op.todo.shift()!;
-    const cm = w.objects[cid];
-    const cur = headTree(w);
-    const label = `${short(cid)} (${firstLine(cm.message)})`;
-    const res = mergeTrees(treeOf(w, cm.parents[0]), cur, cm.tree, 'HEAD', label);
-    if (res.conflicts.length) {
-      applyMergeResult(w, cur, cm.tree, res);
-      op.current = cid;
-      r.conflicts = res.conflicts;
-      for (const p of res.conflicts) {
-        if (p in cur && p in cm.tree) c.out(`Auto-merging ${p}`);
-        c.out(conflictLine(p, cur, cm.tree, label));
+    const step = op.todo.shift()!;
+    if (step.cmd === 'drop') continue;
+    const cm = w.objects[step.id];
+    const head = headId(w)!;
+    const meld = step.cmd === 'squash' || step.cmd === 'fixup';
+    if (!meld && cm.parents[0] === head) {
+      // nothing to replay: the commit already sits on HEAD, keep it as is (same id)
+      hardReset(w, cm.tree);
+      moveHead(w, cm.id, `rebase (${step.cmd}): ${firstLine(cm.message)}`);
+    } else {
+      const cur = headTree(w);
+      const label = `${short(cm.id)} (${firstLine(cm.message)})`;
+      const res = mergeTrees(treeOf(w, cm.parents[0]), cur, cm.tree, 'HEAD', label);
+      if (res.conflicts.length) {
+        applyMergeResult(w, cur, cm.tree, res);
+        op.current = cm.id;
+        op.currentCmd = step.cmd;
+        r.conflicts = res.conflicts;
+        for (const p of res.conflicts) {
+          if (p in cur && p in cm.tree) c.out(`Auto-merging ${p}`);
+          c.out(conflictLine(p, cur, cm.tree, label));
+        }
+        c.err(`error: could not apply ${short(cm.id)}... ${firstLine(cm.message)}`);
+        c.err('hint: Resolve all conflicts manually, mark them as resolved with\nhint: "git add/rm <conflicted_files>", then run "git rebase --continue".\nhint: You can instead skip this commit: run "git rebase --skip".\nhint: To abort and get back to the state before "git rebase", run "git rebase --abort".');
+        c.out(`Could not apply ${short(cm.id)}... ${firstLine(cm.message)}`);
+        c.ok = false;
+        c.explain(`Rebase paused while replaying "${firstLine(cm.message)}". In the conflict, HEAD (top) is ${op.ontoName} + commits replayed so far, and the bottom part is YOUR commit.`);
+        conflictExplain(c, 'git rebase --continue', 'git rebase --abort');
+        return;
       }
-      c.err(`error: could not apply ${short(cid)}... ${firstLine(cm.message)}`);
-      c.err('hint: Resolve all conflicts manually, mark them as resolved with\nhint: "git add/rm <conflicted_files>", then run "git rebase --continue".\nhint: You can instead skip this commit: run "git rebase --skip".\nhint: To abort and get back to the state before "git rebase", run "git rebase --abort".');
-      c.out(`Could not apply ${short(cid)}... ${firstLine(cm.message)}`);
-      c.ok = false;
-      c.explain(`Rebase paused while replaying "${firstLine(cm.message)}". In the conflict, HEAD (top) is ${op.ontoName} + commits replayed so far, and the bottom part is YOUR commit.`);
-      conflictExplain(c, 'git rebase --continue', 'git rebase --abort');
-      return;
+      if (!meld && sameTree(res.tree, cur)) {
+        c.out(`dropping ${short(cm.id)} ${firstLine(cm.message)} -- patch contents already upstream`);
+        continue;
+      }
+      hardReset(w, res.tree);
+      commitStep(c, step, res.tree);
     }
-    if (sameTree(res.tree, cur)) {
-      c.out(`dropping ${short(cid)} ${firstLine(cm.message)} -- patch contents already upstream`);
-      continue;
-    }
-    const id = createCommit(w, { parents: [headId(w)!], message: cm.message, tree: res.tree, author: { name: cm.author, email: cm.email } });
-    hardReset(w, res.tree);
-    moveHead(w, id, `rebase (pick): ${firstLine(cm.message)}`);
+    if (!afterStep(c, step)) return;
   }
   const tip = headId(w)!;
   if (op.branch) {
@@ -1102,10 +1308,50 @@ function runRebase(c: Ctx) {
   r.op = undefined;
   r.conflicts = [];
   c.out(`Successfully rebased and updated ${op.branch ? `refs/heads/${op.branch}` : 'detached HEAD'}.`);
+  if (op.interactive) {
+    const before = exclusive(w, op.origHead, op.onto);
+    const after = exclusive(w, tip, op.onto);
+    const fresh = after.filter((cm) => !before.some((b) => b.id === cm.id)).length;
+    c.explain(
+      tip === op.origHead
+        ? 'Nothing changed: every commit was picked as is.'
+        : `History rewritten: ${plural(before.length, 'commit')} became ${plural(after.length, 'commit')}, ${fresh} of them with new ids. The old versions are still in git reflog (and ORIG_HEAD). If they were pushed, you'd need git push --force-with-lease.`,
+    );
+    return;
+  }
   const replayed = exclusive(w, tip, op.onto).length;
   if (replayed) {
     c.explain(`Your ${plural(replayed, 'commit')} ${replayed === 1 ? 'was' : 'were'} replayed on top of ${op.ontoName} as brand-new commits (new ids!). If the old ones were already pushed, a normal push will be rejected and you'd need git push --force-with-lease.`);
   } else c.explain(`${op.branch ?? 'HEAD'} now simply points at ${op.ontoName}.`);
+}
+
+/** The editor closed: carry on with whatever git was waiting for. */
+export function finishEdit(c: Ctx, text: string) {
+  const w = c.w;
+  const r = R(c);
+  const pe = r.pendingEdit;
+  if (!pe) throw new GitError('error: no editor is waiting');
+  r.pendingEdit = undefined;
+  if (pe.purpose === 'todo') return applyTodo(c, text);
+  const msg = stripComments(text);
+  if (pe.purpose === 'commit') {
+    if (!msg) {
+      c.err('Aborting commit due to empty commit message.');
+      c.ok = false;
+      return;
+    }
+    return commit(c, new Args(['-m', msg]));
+  }
+  const op = r.op;
+  if (op?.kind !== 'rebase') return;
+  const head = w.objects[headId(w)!];
+  if (!msg) c.err('Aborting commit due to empty commit message.');
+  else if (msg !== head.message) {
+    const id = replaceHead(c, head.tree, msg, `rebase (${pe.purpose}): ${firstLine(msg)}`);
+    c.out(`[detached HEAD ${short(id)}] ${firstLine(msg)}`);
+  }
+  op.squash = undefined;
+  runRebase(c);
 }
 
 function rebase(c: Ctx, a: Args) {
@@ -1115,10 +1361,11 @@ function rebase(c: Ctx, a: Args) {
   const abort = a.flag('--abort');
   const skip = a.flag('--skip');
   const quit = a.flag('--quit');
-  if (a.flag('-i', '--interactive')) throw new GitError('error: interactive rebase (-i) is not in the simulator yet.', 'hint: coming in a later level pack!');
+  const editTodo = a.flag('--edit-todo');
+  const interactive = a.flag('-i', '--interactive');
   a.noUnknownFlags('rebase');
   const op = r.op;
-  if (cont || abort || skip || quit) {
+  if (cont || abort || skip || quit || editTodo) {
     if (op?.kind !== 'rebase') throw new GitError('fatal: No rebase in progress?');
     if (abort || quit) {
       if (abort) {
@@ -1132,27 +1379,63 @@ function rebase(c: Ctx, a: Args) {
       } else c.explain('Rebase quit: HEAD stays where it is (detached), and the rebase is forgotten.');
       r.op = undefined;
       r.conflicts = [];
+      r.pendingEdit = undefined;
       return;
+    }
+    if (editTodo) {
+      if (!op.interactive) throw new GitError('error: The --edit-todo action can only be used during interactive rebase.');
+      const text = op.needsTodo
+        ? (op.todoText ?? '')
+        : `${op.todo.map((s) => `${s.cmd} ${short(s.id)} ${firstLine(w.objects[s.id].message)}`).join('\n') || 'noop'}\n${TODO_HELP}\n`;
+      openEditor(c, TODO_FILE, text, 'todo');
+      return;
+    }
+    if (op.needsTodo) {
+      if (!op.todoText) throw new GitError('error: no todo list');
+      return applyTodo(c, op.todoText);
     }
     if (skip) {
       hardReset(w, headTree(w));
       r.conflicts = [];
       if (op.current) c.explain(`Skipped ${short(op.current)}: that commit's changes will NOT be in the result.`);
       op.current = null;
+      op.stopped = false;
       return runRebase(c);
     }
     if (r.conflicts.length) {
       throw new GitError(...r.conflicts.map((p) => `${p}: needs merge`), 'You must edit all merge conflicts and then', 'mark them as resolved using git add');
     }
-    if (computeStatus(w).unstaged.length) throw new GitError('error: cannot rebase: You have unstaged changes.', 'error: Please commit or stash them.', 'hint: git add the files you fixed');
-    if (op.current) {
-      const cm = w.objects[op.current];
-      if (!sameTree(r.index, headTree(w))) {
-        const id = createCommit(w, { parents: [headId(w)!], message: cm.message, tree: r.index, author: { name: cm.author, email: cm.email } });
-        moveHead(w, id, `rebase (continue): ${firstLine(cm.message)}`);
-        c.out(`[detached HEAD ${short(id)}] ${firstLine(cm.message)}`);
+    const st = computeStatus(w);
+    if (st.unstaged.length) throw new GitError('error: cannot rebase: You have unstaged changes.', 'error: Please commit or stash them.', 'hint: git add the files you fixed');
+    if (op.stopped) {
+      if (st.staged.length) {
+        throw new GitError(
+          'You have staged changes in your working tree. If these changes are meant to be',
+          'squashed into the previous commit, run:',
+          '',
+          '  git commit --amend',
+          '',
+          'If they are meant to go into a new commit, run:',
+          '',
+          '  git commit',
+          '',
+          "In both cases, once you're done, continue with:",
+          '',
+          '  git rebase --continue',
+        );
       }
+      op.stopped = false;
+      return runRebase(c);
+    }
+    if (op.current) {
+      const step: TodoStep = { cmd: op.currentCmd ?? 'pick', id: op.current };
+      const meld = step.cmd === 'squash' || step.cmd === 'fixup';
       op.current = null;
+      if (meld || !sameTree(r.index, headTree(w))) {
+        commitStep(c, step, { ...r.index });
+        c.out(`[detached HEAD ${short(headId(w)!)}] ${firstLine(w.objects[headId(w)!].message)}`);
+        if (!afterStep(c, step)) return;
+      }
     }
     return runRebase(c);
   }
@@ -1163,7 +1446,7 @@ function rebase(c: Ctx, a: Args) {
     rev = br ? r.upstream[br] : '';
     if (!rev) throw new GitError('There is no tracking information for the current branch.', 'Please specify which branch you want to rebase against.', '', '    git rebase <branch>');
   }
-  startRebase(c, resolveRev(w, rev), rev);
+  startRebase(c, resolveRev(w, rev), rev, 'rebase', interactive);
 }
 
 // ─── cherry-pick / revert ───
@@ -1763,8 +2046,10 @@ function push(c: Ctx, a: Args) {
       }
       const lost = exclusive(w, remoteTip, local);
       accept(` + ${short(remoteTip)}...${short(local)} ${src} -> ${dst} (forced update)`);
-      if (lost.length) {
-        const others = lost.filter((cm) => cm.author !== cfg(w, 'user.name'));
+      const others = lost.filter((cm) => cm.author !== cfg(w, 'user.name'));
+      if (lost.length && !others.length) {
+        after.push(() => c.explain(`Replaced ${plural(lost.length, 'commit')} of your own on origin/${dst} with the rewritten versions. That's expected after amend or rebase, and fine on a branch only you use.`));
+      } else if (lost.length) {
         after.push(() =>
           c.warn(
             `Force push removed ${plural(lost.length, 'commit')} from origin/${dst}: ${lost.map((cm) => `${short(cm.id)} "${firstLine(cm.message)}" (${cm.author})`).join(', ')}.${others.length ? ` Some were a teammate's work! They'll have a bad time on their next pull.` : ''}${lease ? '' : ' --force-with-lease would have stopped you if those were unknown to you.'}`,
@@ -1982,6 +2267,8 @@ export function runGit(c: Ctx, argv: string[], depth = 0) {
   if (!c.w.repo && !NO_REPO_OK.has(sub) && !(sub === 'config' && rest.includes('--global'))) {
     throw new GitError('fatal: not a git repository (or any of the parent directories): .git');
   }
+  const pe = c.w.repo?.pendingEdit;
+  if (pe) throw new GitError(`error: git is still waiting for your editor to close ${pe.file}`, 'hint: save or close the editor first');
   let args = rest;
   if (sub === 'commit' || sub === 'clean') {
     // expand combined short flags like -am

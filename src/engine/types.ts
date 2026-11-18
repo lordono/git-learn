@@ -36,10 +36,34 @@ export type Op =
       ontoName: string;
       origHead: string;
       branch: string | null;
-      todo: string[];
+      todo: TodoStep[];
+      /** commit whose replay stopped on a conflict */
       current: string | null;
+      currentCmd?: TodoCmd;
+      interactive?: boolean;
+      total?: number;
+      /** -i: waiting for a valid todo list (the last one failed to parse) */
+      needsTodo?: boolean;
+      todoText?: string;
+      /** stopped by an `edit` line, waiting for amend + --continue */
+      stopped?: boolean;
+      /** a squash/fixup chain being melded into HEAD */
+      squash?: { msgs: string[]; edit: boolean };
     }
   | { kind: 'cherry-pick' | 'revert'; commit: string; message: string; origHead: string };
+
+export type TodoCmd = 'pick' | 'reword' | 'edit' | 'squash' | 'fixup' | 'drop';
+export interface TodoStep {
+  cmd: TodoCmd;
+  id: string;
+}
+
+/** git opened $EDITOR and is waiting for it to close (rebase todo, commit message…) */
+export interface PendingEdit {
+  file: string;
+  text: string;
+  purpose: 'todo' | 'reword' | 'squash' | 'commit';
+}
 
 export interface Repo {
   branches: Record<string, string>;
@@ -65,6 +89,7 @@ export interface Repo {
   stages?: Record<string, { ours?: string; theirs?: string }>;
   /** stash entries that were dropped or popped: unreachable but still in the object store */
   lostStashes?: StashEntry[];
+  pendingEdit?: PendingEdit;
 }
 
 /** The shared server everyone pushes to (e.g. GitHub). */

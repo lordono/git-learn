@@ -1,5 +1,5 @@
 import { clone } from '../engine/repo';
-import { runLine } from '../engine/shell';
+import { type RunResult, runLine, saveEditor } from '../engine/shell';
 import type { Line, World } from '../engine/types';
 import type { Level } from './types';
 
@@ -43,3 +43,14 @@ export function fireEvents(level: Level, world: World, line: string, fired: Set<
 }
 
 export const isSolved = (level: Level, w: World) => level.goals.every((g) => safeCheck(g.check, w));
+
+/**
+ * A solution step that starts with this marker is not typed in the terminal:
+ * it is the text you save in the editor git opened (rebase todo, commit message).
+ */
+export const EDITOR = '✎ ';
+
+/** Run one solution step: a terminal line, or an editor save. */
+export function runStep(world: World, step: string): RunResult {
+  return step.startsWith(EDITOR) ? saveEditor(world, step.slice(EDITOR.length)) : runLine(world, step);
+}

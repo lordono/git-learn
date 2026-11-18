@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { runLine } from './shell';
+import { runLine, saveEditor } from './shell';
 import { Scenario } from '../levels/scenario';
 import { headId } from './repo';
 import type { World } from './types';
@@ -155,5 +155,109 @@ describe('newer engine features', () => {
     s.w.remote!.prOnly = ['main'];
     const { out } = sh(s.commit({ 'a.txt': 'b\n' }, 'two').w, 'git push');
     expect(out).toContain('Changes must be made through a pull request');
+  });
+});
+
+describe('interactive rebase', () => {
+  const four = () => {
+    const s = new Scenario().run('git init').commit({ 'a.txt': '0\n' }, 'base');
+    s.commit({ 'a.txt': '1\n' }, 'one').commit({ 'b.txt': 'b\n' }, 'two').commit({ 'c.txt': 'c\n' }, 'three');
+    return s.w;
+  };
+  /** run `git rebase -i`, then save the todo (or a function of the proposed todo) */
+  const rebaseI = (w: World, todo: (proposed: string) => string, base = 'HEAD~3') => {
+    let r = runLine(w, `git rebase -i ${base}`);
+    const pe = r.world.repo!.pendingEdit!;
+    expect(pe.purpose).toBe('todo');
+    const out = r.lines.map((l) => l.text);
+    r = saveEditor(r.world, todo(pe.text));
+    return { w: r.world, out: [...out, ...r.lines.map((l) => l.text)].join('\n') };
+  };
+  const msgs = (w: World) => {
+    const out: string[] = [];
+    let id = headId(w);
+    while (id) {
+      out.push(w.objects[id].message);
+      id = w.objects[id].parents[0];
+    }
+    return out;
+  };
+  const lineOf = (text: string, msg: string) => text.split('\n').find((l) => l.endsWith(` ${msg}`))!;
+
+  it('lists commits oldest first and keeps ids when nothing changes', () => {
+    const start = four();
+    const { w } = rebaseI(start, (t) => {
+      expect(t.split('\n').slice(0, 3).map((l) => l.split(' ')[2])).toEqual(['one', 'two', 'three']);
+      return t;
+    });
+    expect(headId(w)).toBe(headId(start));
+    expect(w.repo!.op).toBeUndefined();
+  });
+  it('squash melds commits and asks for the combined message', () => {
+    const { w, out } = rebaseI(four(), (t) => t.replace(lineOf(t, 'two'), lineOf(t, 'two').replace('pick', 'squash')).replace(lineOf(t, 'three'), lineOf(t, 'three').replace('pick', 's')));
+    const pe = w.repo!.pendingEdit!;
+    expect(pe.purpose).toBe('squash');
+    expect(pe.text).toContain('This is a combination of 3 commits');
+    expect(out).toContain('Waiting for your editor');
+    const done = saveEditor(w, 'One, two and three\n').world;
+    expect(msgs(done)).toEqual(['One, two and three', 'base']);
+    expect(Object.keys(done.files).sort()).toEqual(['a.txt', 'b.txt', 'c.txt']);
+    expect(done.repo!.op).toBeUndefined();
+  });
+  it('fixup melds without asking and keeps the first message', () => {
+    const { w } = rebaseI(four(), (t) => t.replace(/^pick (\w+) two$/m, 'fixup $1 two').replace(/^pick (\w+) three$/m, 'f $1 three'));
+    expect(w.repo!.pendingEdit).toBeUndefined();
+    expect(msgs(w)).toEqual(['one', 'base']);
+  });
+  it('reword opens the message editor', () => {
+    const { w } = rebaseI(four(), (t) => t.replace(/^pick (\w+) two$/m, 'reword $1 two'));
+    expect(w.repo!.pendingEdit!.text.startsWith('two\n')).toBe(true);
+    expect(msgs(saveEditor(w, 'Add b.txt\n# comment\n').world)).toEqual(['three', 'Add b.txt', 'one', 'base']);
+  });
+  it('drop and deleting a line both remove commits; reorder works', () => {
+    const { w, out } = rebaseI(four(), (t) => [lineOf(t, 'three'), lineOf(t, 'one').replace('pick', 'drop')].join('\n'));
+    expect(msgs(w)).toEqual(['three', 'base']);
+    expect(out).toContain('no line in the todo list');
+    expect(w.files['b.txt']).toBeUndefined();
+  });
+  it('edit stops so you can amend, then --continue finishes', () => {
+    const { w, out } = rebaseI(four(), (t) => t.replace(/^pick (\w+) one$/m, 'edit $1 one'));
+    expect(out).toContain('Stopped at');
+    const r = sh(w, 'echo 1b > a.txt', 'git add a.txt', 'git rebase --continue');
+    expect(r.out).toContain('staged changes');
+    const done = sh(w, 'echo 1b > a.txt', 'git add a.txt', 'git commit --amend --no-edit', 'git rebase --continue').w;
+    expect(msgs(done)).toEqual(['three', 'two', 'one', 'base']);
+    expect(done.files['a.txt']).toBe('1b\n');
+  });
+  it('a bad todo can be fixed with --edit-todo; an empty one cancels', () => {
+    const bad = rebaseI(four(), (t) => t.replace('pick', 'pik'));
+    expect(bad.out).toContain("invalid command 'pik'");
+    expect(bad.w.repo!.op?.kind).toBe('rebase');
+    const reopened = runLine(bad.w, 'git rebase --edit-todo').world;
+    const fixed = saveEditor(reopened, reopened.repo!.pendingEdit!.text.replace('pik', 'pick')).world;
+    expect(fixed.repo!.op).toBeUndefined();
+    const empty = rebaseI(four(), () => '# nothing\n');
+    expect(empty.out).toContain('nothing to do');
+    expect(empty.w.repo!.op).toBeUndefined();
+  });
+  it('squash as the first line is refused', () => {
+    expect(rebaseI(four(), (t) => t.replace('pick', 'squash')).out).toContain("cannot 'squash' without a previous commit");
+  });
+  it('a conflict during squash continues into the message editor', () => {
+    const s = new Scenario().run('git init').commit({ 'a.txt': '0\n' }, 'base');
+    s.commit({ 'a.txt': '1\n' }, 'one').commit({ 'b.txt': 'b\n' }, 'two').commit({ 'a.txt': '2\n' }, 'three');
+    // reorder so "three" (edits a.txt) is squashed into "two" before "one" is applied: conflict
+    const { w } = rebaseI(s.w, (t) => [lineOf(t, 'two'), lineOf(t, 'three').replace('pick', 'squash'), lineOf(t, 'one')].join('\n'));
+    expect(w.repo!.conflicts).toEqual(['a.txt']);
+    const r = sh(w, 'echo 2 > a.txt', 'git add a.txt', 'git rebase --continue');
+    expect(r.w.repo!.pendingEdit?.purpose).toBe('squash');
+  });
+  it('plain git commit opens the message editor', () => {
+    const s = new Scenario().run('git init').commit({ 'a.txt': '0\n' }, 'base').write({ 'a.txt': '1\n' });
+    const opened = runLine(runLine(s.w, 'git add a.txt').world, 'git commit').world;
+    expect(opened.repo!.pendingEdit?.purpose).toBe('commit');
+    expect(runLine(opened, 'git status').lines[0].text).toContain('waiting for your editor');
+    expect(msgs(saveEditor(opened, 'Bump a\n').world)[0]).toBe('Bump a');
+    expect(saveEditor(opened, '# only comments\n').lines[0].text).toContain('empty commit message');
   });
 });
