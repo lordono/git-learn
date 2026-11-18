@@ -1,0 +1,123 @@
+import { describe, expect, it } from 'vitest';
+import { LEVELS, type Level } from './levels';
+import { fireEvents, isSolved, startLevel } from './runtime';
+import { runLine } from '../engine/shell';
+import type { World } from '../engine/types';
+
+/** Play commands the way the UI does: run, then fire level events. */
+function play(level: Level, lines: string[], start?: World) {
+  let w = start ?? startLevel(level).world;
+  const fired = new Set<string>();
+  const log: string[] = [];
+  for (const l of lines) {
+    const r = runLine(w, l);
+    log.push(`$ ${l}`, ...r.lines.map((x) => `  [${x.kind}] ${x.text}`));
+    const ev = fireEvents(level, r.world, l, fired);
+    ev.messages.forEach((m) => log.push(`  [event] ${m}`));
+    w = ev.world;
+  }
+  return { w, log: log.join('\n') };
+}
+
+const byId = (id: string) => {
+  const l = LEVELS.find((x) => x.id === id);
+  if (!l) throw new Error(`no level ${id}`);
+  return l;
+};
+
+it('level ids are unique', () => {
+  expect(new Set(LEVELS.map((l) => l.id)).size).toBe(LEVELS.length);
+});
+
+describe.each(LEVELS.map((l) => [l.id, l] as const))('level %s', (_id, level) => {
+  it('starts unsolved, and its prelude runs', () => {
+    const { world, transcript } = startLevel(level);
+    expect(isSolved(level, world)).toBe(false);
+    expect(transcript).toHaveLength(level.prelude?.length ?? 0);
+  });
+  it('is solved by its solution', () => {
+    const { w, log } = play(level, level.solution);
+    const failed = level.goals.filter((g) => !g.check(w)).map((g) => g.text);
+    expect(failed, log).toEqual([]);
+  });
+  it('fires every scripted event during the solution', () => {
+    const fired = new Set<string>();
+    let w = startLevel(level).world;
+    for (const l of level.solution) {
+      w = fireEvents(level, runLine(w, l).world, l, fired).world;
+    }
+    expect([...fired].sort()).toEqual((level.events ?? []).map((e) => e.id).sort());
+  });
+});
+
+describe('bad moves are caught', () => {
+  it('force-pushing over a protected main is rejected', () => {
+    const level = byId('revert-pushed');
+    const { w, log } = play(level, ['git reset --hard HEAD~2', 'git push --force']);
+    expect(log).toContain('protected branch');
+    expect(level.goals[0].check(w)).toBe(true);
+  });
+
+  it('plain pull on divergent branches asks how to reconcile', () => {
+    const { log } = play(byId('push-rejected'), ['git pull']);
+    expect(log).toContain('Need to specify how to reconcile divergent branches');
+  });
+
+  it('force push warns that a teammate commit was wiped', () => {
+    const level = byId('push-rejected');
+    const { w, log } = play(level, ['git push --force']);
+    expect(log).toContain("teammate's work");
+    expect(level.goals[1].check(w)).toBe(false);
+  });
+
+  it('force-with-lease refuses when origin moved since the last fetch', () => {
+    const { log } = play(byId('lease-saves-you'), ['git push --force-with-lease']);
+    expect(log).toContain('stale info');
+  });
+
+  it('plain --force in the lease level deletes Alex\'s tests and fails the level', () => {
+    const level = byId('lease-saves-you');
+    const { w } = play(level, ['git push --force']);
+    expect(level.goals[0].check(w)).toBe(false);
+  });
+
+  it('reset --hard on uncommitted work warns that it is unrecoverable', () => {
+    const { log } = play(byId('stash-pull'), ['git reset --hard']);
+    expect(log).toContain('thrown away');
+  });
+
+  it('merge --abort restores the pre-merge state', () => {
+    const level = byId('merge-conflict');
+    const start = startLevel(level).world;
+    const { w } = play(level, ['git pull --no-rebase', 'git merge --abort'], start);
+    expect(w.repo!.op).toBeUndefined();
+    expect(w.files['config.js']).toBe(start.files['config.js']);
+  });
+
+  it('moving target: the second push is rejected after Alex pushes mid-merge', () => {
+    const { log } = play(byId('moving-target'), byId('moving-target').solution.slice(0, 5));
+    expect(log).toContain('Alex: "just pushed analytics');
+    expect(log).toContain('[rejected]');
+  });
+
+  it('merging header after footer makes header a non-fast-forward', () => {
+    const level = byId('fast-forward');
+    const { w } = play(level, ['git merge footer', 'git merge header']);
+    expect(level.goals[0].check(w)).toBe(false);
+  });
+
+  it('branch -d before pulling warns it is not merged to HEAD yet', () => {
+    const { log } = play(byId('gone-upstream'), ['git switch main', 'git branch -d holiday-banner']);
+    expect(log).toContain('not yet merged to HEAD');
+  });
+
+  it('branch -d refuses after prune, until main has the commit', () => {
+    const { log } = play(byId('gone-upstream'), ['git fetch --prune', 'git switch main', 'git branch -d holiday-banner']);
+    expect(log).toContain('not fully merged');
+  });
+
+  it('rm -rf .git deletes the repo', () => {
+    const { w } = play(byId('reflog-rescue'), ['rm -rf .git']);
+    expect(w.repo).toBeNull();
+  });
+});

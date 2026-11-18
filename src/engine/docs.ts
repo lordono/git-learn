@@ -1,0 +1,81 @@
+/** Short, friendly docs shown for `git <cmd> -h` and `git help`. */
+export const COMMAND_DOCS: Record<string, { summary: string; usage: string[] }> = {
+  init: { summary: 'Create a new repository (a hidden .git folder) in this directory.', usage: ['git init'] },
+  config: {
+    summary: 'Read or write settings. --global = every repo (~/.gitconfig), default = this repo (.git/config).',
+    usage: [
+      'git config --global user.name "Your Name"',
+      'git config --global user.email you@example.com',
+      'git config pull.rebase true        # make plain `git pull` rebase',
+      'git config alias.st status         # then `git st` works',
+      'git config --list',
+    ],
+  },
+  status: { summary: 'Show what is staged, what is modified but unstaged, and what is untracked.', usage: ['git status'] },
+  add: {
+    summary: 'Copy file contents from your working directory into the staging area (the next commit).',
+    usage: ['git add <file>', 'git add .            # everything here', 'git add -A           # including deletions'],
+  },
+  rm: { summary: 'Remove a file from the working directory and the staging area.', usage: ['git rm <file>', 'git rm --cached <file>   # stop tracking but keep the file'] },
+  commit: {
+    summary: 'Save the staging area as a new snapshot and move your branch forward to it.',
+    usage: ['git commit -m "message"', 'git commit -am "message"   # stage tracked changes + commit', 'git commit --amend -m "better message"', 'git commit --amend --no-edit'],
+  },
+  log: { summary: 'Show commit history.', usage: ['git log', 'git log --oneline', 'git log --oneline --all', 'git log main..origin/main   # commits on origin/main not on main'] },
+  reflog: {
+    summary: 'Your local diary of everywhere HEAD has been. The #1 recovery tool.',
+    usage: ['git reflog', 'git reset --hard HEAD@{1}   # go back to where you were one step ago', 'git branch rescue HEAD@{3}  # save an old position as a branch'],
+  },
+  branch: {
+    summary: 'List, create, rename or delete branches. A branch is just a movable label on a commit.',
+    usage: ['git branch', 'git branch -vv          # with upstream info', 'git branch <name> [<start>]', 'git branch -d <name>     # -D to force', 'git branch -m <new-name>', 'git branch -f <name> <commit>', 'git branch -u origin/<name>'],
+  },
+  switch: { summary: 'Move to another branch.', usage: ['git switch <branch>', 'git switch -c <new-branch>', 'git switch -', 'git switch --detach <commit>'] },
+  checkout: {
+    summary: 'The older do-everything command: switch branches, detach HEAD, or restore files.',
+    usage: ['git checkout <branch>', 'git checkout -b <new-branch>', 'git checkout <commit>      # detached HEAD', 'git checkout -- <file>     # discard changes (like git restore)'],
+  },
+  restore: {
+    summary: 'Restore files: discard working changes, or unstage.',
+    usage: ['git restore <file>            # discard unstaged changes ⚠️', 'git restore --staged <file>   # unstage, keep changes', 'git restore --source=HEAD~1 <file>'],
+  },
+  reset: {
+    summary: 'Move the current branch to another commit. The mode decides what else gets reset.',
+    usage: [
+      'git reset --soft HEAD~1    # undo commit, keep changes staged',
+      'git reset HEAD~1           # (--mixed) undo commit, keep changes unstaged',
+      'git reset --hard HEAD~1    # undo commit AND throw away changes ⚠️',
+      'git reset <file>           # unstage a file',
+      'git reset --hard HEAD@{1}  # undo the last reset',
+    ],
+  },
+  merge: {
+    summary: 'Join another branch into the current one (fast-forward if possible, else a merge commit).',
+    usage: ['git merge <branch>', 'git merge --no-ff <branch>', 'git merge --ff-only <branch>', 'git merge --abort', 'git merge --continue'],
+  },
+  rebase: {
+    summary: 'Replay your commits on top of another commit, producing new commits and a linear history.',
+    usage: ['git rebase <branch>', 'git rebase --continue   # after fixing a conflict + git add', 'git rebase --skip', 'git rebase --abort      # put everything back'],
+  },
+  'cherry-pick': { summary: 'Copy one commit onto the current branch.', usage: ['git cherry-pick <commit>', 'git cherry-pick --continue', 'git cherry-pick --abort'] },
+  revert: {
+    summary: 'Create a new commit that undoes an earlier one. Safe for shared branches: no history rewrite.',
+    usage: ['git revert <commit>', 'git revert HEAD', 'git revert --continue', 'git revert --abort'],
+  },
+  stash: {
+    summary: 'Shelve uncommitted changes so you get a clean working tree, then bring them back later.',
+    usage: ['git stash', 'git stash -u        # include untracked files', 'git stash -m "msg"', 'git stash list', 'git stash pop', 'git stash apply', 'git stash drop'],
+  },
+  fetch: { summary: "Download new commits from the remote and update origin/* labels. Doesn't touch your branches or files.", usage: ['git fetch', 'git fetch --prune'] },
+  pull: {
+    summary: 'fetch + merge (or + rebase). Brings origin changes into your current branch.',
+    usage: ['git pull', 'git pull --rebase   # same as -r', 'git pull --no-rebase', 'git pull --ff-only'],
+  },
+  push: {
+    summary: 'Upload your commits and move the branch on the remote.',
+    usage: ['git push', 'git push -u origin <branch>    # first push of a new branch', 'git push --force-with-lease    # safer force push', 'git push --force               # dangerous ⚠️', 'git push origin --delete <branch>'],
+  },
+  remote: { summary: 'Manage remote nicknames (origin is just a name for a URL).', usage: ['git remote -v', 'git remote add origin <url>', 'git remote remove origin'] },
+  diff: { summary: 'Show line changes.', usage: ['git diff               # working dir vs staging', 'git diff --staged      # staging vs last commit', 'git diff main feature'] },
+  show: { summary: 'Show a commit and its changes.', usage: ['git show', 'git show <commit>'] },
+};
