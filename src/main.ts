@@ -252,7 +252,11 @@ function runLazySteps(steps: Step[]): { ok: boolean; log: LogEntry[]; errLines: 
   const log: LogEntry[] = [];
   for (const step of steps) {
     const { res, label } = execStep(S.world, step);
-    if (!label && res.world === S.world) continue;
+    if (!label) {
+      // internal bookkeeping (e.g. labelling a reflog entry): no output, no log line
+      if (res.world !== S.world) S.world = res.world;
+      continue;
+    }
     termOut.insertAdjacentHTML('beforeend', cmdHtml(`${label}   # via lazygit`, S.world));
     print(res.lines);
     if (res.world !== S.world) commitWorld(res.world);

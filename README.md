@@ -2,7 +2,7 @@
 
 Learn git by typing real commands in a sandbox where every mistake can be undone.
 
-55 levels in seven chapters (Basics, Undo & rescue, Team life, Rewriting history, Detective work, Boss levels, lazygit). Each level drops you into a situation (normal workflow, or a mess you made, or a mess a teammate made) and checks the repository's final state. Next to the terminal you can watch the commit graph, the three trees (working dir / staging / HEAD), and the server (`origin`) change as you type.
+57 levels in seven chapters (Basics, Undo & rescue, Team life, Rewriting history, Detective work, Boss levels, lazygit). Each level drops you into a situation (normal workflow, or a mess you made, or a mess a teammate made) and checks the repository's final state. Next to the terminal you can watch the commit graph, the three trees (working dir / staging / HEAD), and the server (`origin`) change as you type.
 
 ```bash
 npm install

@@ -15,7 +15,15 @@ export type Panel = 'status' | 'files' | 'branches' | 'commits' | 'stash';
 export const PANELS: Panel[] = ['status', 'files', 'branches', 'commits', 'stash'];
 
 /** something lazygit runs: a git/shell command, an editor save, or writing a file (merge view) */
-export type Step = string | { editor: string } | { editorKeep: true } | { write: string; text: string };
+export type Step =
+  | string
+  | { editor: string }
+  | { editorKeep: true }
+  | { write: string; text: string }
+  /** put exact content in the staging area for one file (line/hunk staging); null = remove */
+  | { stage: string; text: string | null; note: string }
+  /** label the newest reflog entry, like lazygit's GIT_REFLOG_ACTION="[lazygit undo]" */
+  | { reflogAction: string };
 
 export type Outcome =
   | { kind: 'run'; steps: Step[]; then?: (w: World) => Outcome }
@@ -25,6 +33,7 @@ export type Outcome =
   | { kind: 'error'; message: string }
   | { kind: 'resolve'; path: string }
   | { kind: 'copy'; ids: string[] }
+  | { kind: 'stage'; path: string }
   | { kind: 'none' };
 
 const q = (s: string) => (/^[\w./@{}~^:-]+$/.test(s) ? s : JSON.stringify(s));
@@ -207,6 +216,18 @@ export function execStep(w: World, step: Step): { res: RunResult; label: string 
     next.files[step.write] = step.text;
     return { res: { world: next, lines: [], ok: true, actions: [] }, label: `(merge view) wrote the resolved ${step.write}` };
   }
+  if ('stage' in step) {
+    const next = structuredClone(w);
+    if (step.text === null) delete next.repo!.index[step.stage];
+    else next.repo!.index[step.stage] = step.text;
+    return { res: { world: next, lines: [], ok: true, actions: [] }, label: `(staging view) ${step.note}` };
+  }
+  if ('reflogAction' in step) {
+    const next = structuredClone(w);
+    const last = next.repo?.reflog.at(-1);
+    if (last) last.msg = `${step.reflogAction}: ${last.msg}`;
+    return { res: { world: next, lines: [], ok: true, actions: [] }, label: '' };
+  }
   const pe = w.repo?.pendingEdit;
   if ('editorKeep' in step) {
     if (!pe) return { res: { world: w, lines: [], ok: true, actions: [] }, label: '' };
@@ -259,6 +280,8 @@ export function onKey(w: World, ctx: Ctx, key: string): Outcome {
     return busy(w) ?? run('git pull');
   }
   if (key === 'm') return opMenu(w);
+  if (key === 'z') return undo(w);
+  if (key === 'Z') return redo(w);
   if (key === ':') return { kind: 'prompt', title: 'Shell command', then: (t) => (t.trim() ? run(t.trim()) : { kind: 'none' }) };
   switch (ctx.panel) {
     case 'files':
@@ -326,8 +349,10 @@ function filesKey(w: World, ctx: Ctx, key: string): Outcome {
       if (f.conflict) return { kind: 'resolve', path: f.path };
       return f.hasUnstaged ? run(`git add ${q(f.path)}`) : run(`git restore --staged ${q(f.path)}`);
     case 'enter':
-      if (f?.conflict) return { kind: 'resolve', path: f.path };
-      return err('Staging single lines/hunks is not in the sandbox yet: space stages the whole file.');
+      if (!f) return { kind: 'none' };
+      if (f.conflict) return { kind: 'resolve', path: f.path };
+      if (f.untracked || !(f.path in r(w).index) || !(f.path in w.files)) return err(`${f.path} is ${f.untracked ? 'a new file' : 'added or deleted as a whole'}: stage it with space. (Line staging works on modified files.)`);
+      return { kind: 'stage', path: f.path };
     case 'a':
       return rows.some((x) => x.hasUnstaged) ? run('git add -A') : rows.length ? run('git reset') : { kind: 'none' };
     case 'c': {
@@ -498,10 +523,144 @@ function stashKey(w: World, ctx: Ctx, key: string): Outcome {
 
 /** the key hints shown at the bottom (and in the ? help) for a panel */
 export const KEYS: Record<Panel | 'global', [string, string][]> = {
-  global: [['p', 'pull'], ['P', 'push'], ['m', 'merge/rebase options'], [':', 'shell command'], ['1-5', 'jump to panel'], ['?', 'keybindings']],
+  global: [['p', 'pull'], ['P', 'push'], ['z', 'undo'], ['Z', 'redo'], ['m', 'merge/rebase options'], [':', 'shell command'], ['1-5', 'jump to panel'], ['?', 'keybindings']],
   status: [],
-  files: [['space', 'stage/unstage'], ['a', 'stage all'], ['c', 'commit'], ['A', 'amend'], ['d', 'discard'], ['s', 'stash'], ['i', 'ignore'], ['f', 'fetch'], ['enter', 'resolve conflict']],
+  files: [['space', 'stage/unstage'], ['a', 'stage all'], ['c', 'commit'], ['A', 'amend'], ['d', 'discard'], ['s', 'stash'], ['i', 'ignore'], ['f', 'fetch'], ['enter', 'stage lines / resolve']],
   branches: [['space', 'checkout'], ['n', 'new branch'], ['M', 'merge into current'], ['r', 'rebase onto'], ['d', 'delete'], ['R', 'rename'], ['u', 'set upstream'], ['f', 'fast-forward']],
   commits: [['s', 'squash down'], ['f', 'fixup'], ['r', 'reword'], ['d', 'drop'], ['e', 'edit'], ['ctrl+j/k', 'move'], ['t', 'revert'], ['g', 'reset'], ['c', 'copy'], ['v', 'paste'], ['T', 'tag'], ['space', 'checkout']],
   stash: [['space', 'apply'], ['g', 'pop'], ['d', 'drop']],
 };
+
+// ───────────────────────────── undo / redo (z / Z) ─────────────────────────────
+//
+// Like lazygit: walk the HEAD reflog from newest to oldest. Entries made by an undo or redo are
+// labelled "[lazygit undo]" / "[lazygit redo]" so repeated z keeps going further back, and Z
+// re-does what the last z undid. Only commits and checkouts are undone, never the working tree.
+
+const UNDO = '[lazygit undo]';
+const REDO = '[lazygit redo]';
+
+interface Move {
+  /** what the entry did, for the confirmation text */
+  what: string;
+  /** go back to this branch by name (a checkout) … */
+  branch?: string;
+  /** … or hard-reset to this commit */
+  id?: string;
+}
+
+/** reflog index (oldest-first) of where an action started, so a whole rebase is undone at once */
+function actionStart(w: World, i: number): number {
+  const log = w.repo!.reflog;
+  if (/^(rebase|pull --rebase).*\((finish|pick|continue|squash|fixup|reword|edit)\)/.test(log[i].msg.replace(/^\[lazygit (undo|redo)\]: /, ''))) {
+    for (let j = i; j >= 0; j--) if (/\(start\)/.test(log[j].msg)) return j;
+  }
+  return i;
+}
+
+function moveBack(w: World, i: number): Move | null {
+  const log = w.repo!.reflog;
+  const start = actionStart(w, i);
+  const msg = log[i].msg;
+  const co = msg.match(/^checkout: moving from (\S+) to (\S+)$/);
+  if (co && start === i) return { what: msg, branch: co[1] };
+  if (start === 0) return null;
+  return { what: start === i ? msg : `${log[start].msg.split(':')[0].replace(' (start)', '')} (${i - start + 1} steps)`, id: log[start - 1].id };
+}
+
+function undo(w: World): Outcome {
+  const log = w.repo!.reflog;
+  let depth = 0;
+  for (let i = log.length - 1; i >= 0; i--) {
+    const m = log[i].msg;
+    if (m.startsWith(UNDO)) depth++;
+    else if (m.startsWith(REDO)) depth--;
+    else {
+      const start = actionStart(w, i);
+      if (depth > 0) {
+        depth--;
+        i = start;
+        continue;
+      }
+      const mv = moveBack(w, i);
+      if (!mv) break;
+      return confirmMove(w, mv, UNDO, 'Undo');
+    }
+  }
+  return err('Nothing left to undo in the reflog.');
+}
+
+function redo(w: World): Outcome {
+  const log = w.repo!.reflog;
+  let depth = 0;
+  for (let i = log.length - 1; i >= 0; i--) {
+    const m = log[i].msg;
+    if (m.startsWith(REDO)) depth++;
+    else if (m.startsWith(UNDO)) {
+      if (depth > 0) {
+        depth--;
+        continue;
+      }
+      const co = m.match(/checkout: moving from (\S+) to (\S+)$/);
+      return confirmMove(w, co ? { what: m, branch: co[1] } : { what: m, id: log[i - 1].id }, REDO, 'Redo');
+    } else break;
+  }
+  return err('Nothing to redo. (Redo only works right after an undo.)');
+}
+
+function confirmMove(w: World, mv: Move, tag: string, title: string): Outcome {
+  if (w.repo!.op) return err(`Finish or abort the ${w.repo!.op.kind} first (m).`);
+  const st = computeStatus(w);
+  if (st.staged.length || st.unstaged.length) return err(`You have uncommitted changes. ${title} moves HEAD with a hard reset, so stash (s) or commit them first.`);
+  const cmd = mv.branch ? `git checkout ${q(mv.branch)}` : `git reset --hard ${short(mv.id!)}`;
+  return {
+    kind: 'confirm',
+    title,
+    body: `${title} "${mv.what.replace(/^\[lazygit (undo|redo)\]: /, '')}"? lazygit reads the reflog and runs: ${cmd}`,
+    then: () => run(cmd, { reflogAction: tag }),
+  };
+}
+
+// ───────────────────────────── line / hunk staging ─────────────────────────────
+
+export interface DiffOp {
+  t: ' ' | '+' | '-';
+  line: string;
+}
+
+/** the diff shown on one side of the staging view */
+export function stagingOps(w: World, path: string, side: 'unstaged' | 'staged'): DiffOp[] {
+  const r = w.repo!;
+  return side === 'unstaged' ? diffLines(r.index[path] ?? '', w.files[path] ?? '') : diffLines(headTree(w)[path] ?? '', r.index[path] ?? '');
+}
+
+/** indexes of the change lines in the hunk (run of +/- lines) around `i` */
+export function hunkAt(ops: DiffOp[], i: number): number[] {
+  if (!ops[i] || ops[i].t === ' ') return [];
+  let a = i;
+  let b = i;
+  while (a > 0 && ops[a - 1].t !== ' ') a--;
+  while (b < ops.length - 1 && ops[b + 1].t !== ' ') b++;
+  return Array.from({ length: b - a + 1 }, (_, k) => a + k);
+}
+
+/**
+ * Stage (or unstage) only the picked change lines, the way `git add -p` / lazygit's staging view do:
+ * the new staging-area version applies just those lines of the diff.
+ */
+export function stageLines(w: World, path: string, side: 'unstaged' | 'staged', picked: number[]): Outcome {
+  const ops = stagingOps(w, path, side);
+  const pick = new Set(picked.filter((i) => ops[i] && ops[i].t !== ' '));
+  if (!pick.size) return { kind: 'none' };
+  const out: string[] = [];
+  ops.forEach((op, i) => {
+    const on = pick.has(i);
+    if (op.t === ' ') out.push(op.line);
+    // staging: apply picked changes to the index. unstaging: revert picked changes in the index.
+    else if (side === 'unstaged' ? (op.t === '+') === on : (op.t === '-') === on) out.push(op.line);
+  });
+  const text = out.length ? out.join('\n') + '\n' : '';
+  const n = pick.size;
+  const note = `${side === 'unstaged' ? 'staged' : 'unstaged'} ${n} line${n === 1 ? '' : 's'} of ${path} (plain git: git ${side === 'unstaged' ? 'add' : 'restore --staged'} -p ${path})`;
+  return run({ stage: path, text, note });
+}

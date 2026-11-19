@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { LEVELS, type Level } from '../levels/levels';
 import { fireEvents, isSolved, startLevel } from '../levels/runtime';
 import type { World } from '../engine/types';
-import { type Outcome, type Panel, type Pick, branchRows, commitRows, execStep, fileRows, onKey, resolveOutcome, stashRows } from './model';
+import { type Outcome, type Panel, type Pick, branchRows, commitRows, execStep, fileRows, hunkAt, onKey, resolveOutcome, stageLines, stagingOps, stashRows } from './model';
 
 type Act = { panel: Panel; select?: string; key: string; answers?: string[] };
 
@@ -45,7 +45,13 @@ function drive(level: Level, acts: Act[], start?: World) {
         out = o.items.find((i) => i.key === k)!.then();
       }
       else if (o.kind === 'resolve') out = resolveOutcome(w, o.path, answers as Pick[]);
-      else if (o.kind === 'copy') copied = o.ids;
+      else if (o.kind === 'stage') {
+        const [mode, n] = (answers.shift() ?? 'hunk:0').split(':');
+        const ops = stagingOps(w, o.path, 'unstaged');
+        const starts = ops.map((x, i) => (x.t !== ' ' && (mode === 'line' || i === 0 || ops[i - 1].t === ' ') ? i : -1)).filter((i) => i >= 0);
+        const at = starts[Number(n)];
+        out = stageLines(w, o.path, 'unstaged', mode === 'hunk' ? hunkAt(ops, at) : [at]);
+      } else if (o.kind === 'copy') copied = o.ids;
       else if (o.kind === 'error') errors.push(o.message);
     }
   }
@@ -79,6 +85,11 @@ const SCRIPTS: Record<string, Act[]> = {
     { panel: 'files', key: 'P' },
   ],
   'lg-reword': [{ panel: 'commits', select: 'asdf', key: 'r', answers: ['Apply coupons at checkout'] }],
+  'lg-undo': [{ panel: 'files', key: 'z' }],
+  'lg-partial': [
+    { panel: 'files', select: 'cart.js', key: 'enter', answers: ['hunk:1'] },
+    { panel: 'files', key: 'c', answers: ['Count item quantities in total'] },
+  ],
   'lg-cherry-pick': [
     { panel: 'commits', select: 'Fix checkout crash', key: 'c' },
     { panel: 'branches', select: 'release/1.0', key: 'space' },
@@ -136,4 +147,53 @@ describe('lazygit actions', () => {
     ]);
     expect(w.repo!.op).toBeUndefined();
   });
+
+  it('z undoes step by step through the reflog, Z redoes', () => {
+    const level = byId('lg-undo');
+    const once = drive(level, [{ panel: 'files', key: 'z' }]);
+    expect(once.log).toContain('git reset --hard');
+    expect(once.w.repo!.reflog.at(-1)!.msg).toMatch(/^\[lazygit undo\]/);
+    const twice = drive(level, [{ panel: 'files', key: 'z' }, { panel: 'files', key: 'z' }]);
+    expect(commitRows(twice.w)[0].message).toBe('Add about page');
+    const redone = drive(level, [{ panel: 'files', key: 'z' }, { panel: 'files', key: 'z' }, { panel: 'files', key: 'Z' }]);
+    expect(commitRows(redone.w)[0].message).toBe('Add contact page');
+  });
+  it('z undoes a whole rebase at once', () => {
+    const level = byId('rebase-i-drop');
+    const start = startLevel(level).world;
+    const dropped = drive(level, [{ panel: 'commits', select: 'TEMP', key: 'd' }]).w;
+    const { w } = drive(level, [{ panel: 'files', key: 'z' }], dropped);
+    expect(w.repo!.branches.ranking).toBe(start.repo!.branches.ranking);
+  });
+  it('z undoes a checkout by switching back', () => {
+    const level = byId('hotfix');
+    const moved = drive(level, [{ panel: 'branches', select: 'release/1.0', key: 'space' }]).w;
+    const { w, log } = drive(level, [{ panel: 'files', key: 'z' }], moved);
+    expect(log).toContain('git checkout main');
+    expect(w.repo!.head).toEqual({ kind: 'branch', name: 'main' });
+  });
+  it('z refuses with uncommitted changes', () => {
+    const level = byId('rebase-i-drop');
+    const dirty = startLevel(level).world;
+    dirty.files['rank.js'] += '// wip\n';
+    const { errors } = drive(level, [{ panel: 'files', key: 'z' }], dirty);
+    expect(errors.join()).toContain('uncommitted');
+  });
+  it('line staging stages one line, and unstaging puts it back', () => {
+    const level = byId('lg-partial');
+    const { w } = drive(level, [{ panel: 'files', select: 'cart.js', key: 'enter', answers: ['line:0'] }]);
+    expect(w.repo!.index['cart.js']).toContain('DEBUG');
+    expect(w.repo!.index['cart.js']).not.toContain('qty');
+    const back = stageLines(w, 'cart.js', 'staged', [hunkAt(stagingOps(w, 'cart.js', 'staged'), 1)[0]]);
+    expect(back.kind).toBe('run');
+    if (back.kind === 'run') expect(execStep(w, back.steps[0]).res.world.repo!.index['cart.js']).not.toContain('DEBUG');
+  });
+  it('enter on a new file asks you to stage it whole', () => {
+    const level = byId('staging');
+    const w = startLevel(level).world;
+    w.files['new.txt'] = 'x\n';
+    const { errors } = drive(level, [{ panel: 'files', select: 'new.txt', key: 'enter' }], w);
+    expect(errors[0]).toContain('new file');
+  });
 });
+

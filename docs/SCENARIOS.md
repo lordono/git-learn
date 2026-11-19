@@ -124,8 +124,8 @@ The terminal can be swapped for a lazygit-style screen (Status / Files / Branche
 | ✅ | fixup without a todo list | `f`, `f`, `P` (force prompt) | `git rebase -i` + todo, `git push --force-with-lease` |
 | ✅ | reword an old commit | `r` | `git rebase -i` + reword + message |
 | ✅ | copy & paste a commit | `c`, `space`, `v` | `git switch`, `git cherry-pick` |
-| | undo with `z` (reflog-based) | `z` / `Z` | needs care to match lazygit's real undo semantics |
-| | line/hunk staging | `enter` on a file | needs partial staging in the engine |
+| ✅ | undo with `z` | `z` (`Z` redo) | reads the reflog → `git reset --hard <sha>` / `git checkout <branch>`; whole rebases undo at once; entries tagged `[lazygit undo]` |
+| ✅ | commit half a file | `enter`, `a`, `j`, `space`, `c` | staging view = `git add -p`: stages single lines or hunks |
 | | reflog tab, remote branches tab | | |
 
 ## Engine backlog (unlocks 🟡 levels)

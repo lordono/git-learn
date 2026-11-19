@@ -16,6 +16,9 @@ import {
   parseConflicts,
   resolveOutcome,
   rowCount,
+  stageLines,
+  stagingOps,
+  hunkAt,
   stashRows,
 } from '../lazygit/model';
 import { esc } from './panels';
@@ -37,7 +40,8 @@ type Popup =
   | { kind: 'menu'; title: string; items: { key: string; label: string; then: () => Outcome }[]; sel: number }
   | { kind: 'error'; title: string; lines: Line[] }
   | { kind: 'resolve'; path: string; chunks: Chunk[]; picks: (Pick | null)[]; cur: number; side: 'ours' | 'theirs' }
-  | { kind: 'help' };
+  | { kind: 'help' }
+  | { kind: 'stage'; path: string; side: 'unstaged' | 'staged'; cur: number; hunk: boolean };
 
 const TITLES: Record<Panel, string> = { status: 'Status', files: 'Files', branches: 'Local branches', commits: 'Commits', stash: 'Stash' };
 
@@ -145,6 +149,23 @@ export class LazyGitView {
         return `<div class="lg-pop"><h4>Keybindings</h4><div class="lg-pre">${(['global', 'files', 'branches', 'commits', 'stash'] as const)
           .map((sec) => `<div class="lg-cyan">${sec}</div>${KEYS[sec].map(([k, what]) => `<div>  <b>${esc(k.padEnd(9))}</b> ${esc(what)}</div>`).join('')}`)
           .join('')}<div class="lg-cyan">moving</div><div>  <b>j k ↑ ↓  </b> move · <b>tab h l</b> switch panel · <b>esc</b> close</div></div>${foot('<button class="lg-key" data-pop="no"><b>esc</b> close</button>')}</div>`;
+      case 'stage': {
+        const w = this.host.world();
+        const pane = (side: 'unstaged' | 'staged') => {
+          const ops = stagingOps(w, p.path, side);
+          const on = p.side === side;
+          const marked = on ? new Set(p.hunk ? hunkAt(ops, p.cur) : [p.cur]) : new Set<number>();
+          const body = ops.some((o) => o.t !== ' ')
+            ? ops
+                .map((o, i) => `<div class="lg-sl ${o.t === '+' ? 'k-diff-add' : o.t === '-' ? 'k-diff-del' : 'lg-dim'} ${marked.has(i) ? 'pick' : ''}">${o.t}${esc(o.line) || '&nbsp;'}</div>`)
+                .join('')
+            : '<div class="lg-empty">no changes</div>';
+          return `<div class="lg-stage-pane ${on ? 'on' : ''}" data-side="${side}"><div class="lg-hunk-label">${side === 'unstaged' ? 'Unstaged changes' : 'Staged changes'}</div><div class="lg-pre">${body}</div></div>`;
+        };
+        return `<div class="lg-pop lg-pop-wide"><h4>Staging: ${esc(p.path)} · selecting ${p.hunk ? 'whole hunks' : 'single lines'}</h4><div class="lg-stage">${pane('unstaged')}${pane('staged')}</div>${foot(
+          `<button class="lg-key" data-st="space"><b>space</b> ${p.side === 'unstaged' ? 'stage' : 'unstage'} ${p.hunk ? 'hunk' : 'line'}</button> <button class="lg-key" data-st="a"><b>a</b> toggle line / hunk</button> <button class="lg-key" data-st="tab"><b>tab</b> switch side</button> <button class="lg-key" data-st="j"><b>j k</b> move</button> <button class="lg-key" data-pop="no"><b>esc</b> back</button>`,
+        )}</div>`;
+      }
       case 'resolve': {
         let n = -1;
         const body = p.chunks
@@ -180,6 +201,10 @@ export class LazyGitView {
       this.popup.sel = Number(item);
       return this.popKey('enter');
     }
+    const st = t.closest<HTMLElement>('[data-st]')?.dataset.st;
+    if (st) return this.popKey(st === 'space' ? ' ' : st);
+    const sideEl = t.closest<HTMLElement>('[data-side]');
+    if (sideEl && this.popup?.kind === 'stage' && this.popup.side !== sideEl.dataset.side) return this.popKey('tab');
     const res = t.closest<HTMLElement>('[data-res]')?.dataset.res;
     if (res) return this.popKey(res === 'ours' ? 'arrowleft' : res === 'theirs' ? 'arrowright' : res === 'pick' ? ' ' : 'b');
     if (this.popup) return;
@@ -275,6 +300,38 @@ export class LazyGitView {
         }
         p.cur = next;
       }
+    } else if (p.kind === 'stage') {
+      const w = this.host.world();
+      const ops = stagingOps(w, p.path, p.side);
+      const changes = ops.map((o, i) => (o.t === ' ' ? -1 : i)).filter((i) => i >= 0);
+      const step = (dir: 1 | -1) => {
+        // move to the next change line (or the next hunk in hunk mode)
+        const skip = p.hunk ? hunkAt(ops, p.cur) : [p.cur];
+        const from = dir > 0 ? Math.max(...skip) : Math.min(...skip);
+        const next = dir > 0 ? changes.find((i) => i > from) : [...changes].reverse().find((i) => i < from);
+        if (next !== undefined) p.cur = next;
+      };
+      if (k === 'j' || k === 'arrowdown') step(1);
+      else if (k === 'k' || k === 'arrowup') step(-1);
+      else if (k === 'a') p.hunk = !p.hunk;
+      else if (k === 'tab' || k === 'arrowleft' || k === 'arrowright' || k === 'h' || k === 'l') {
+        p.side = p.side === 'unstaged' ? 'staged' : 'unstaged';
+        p.cur = stagingOps(w, p.path, p.side).findIndex((o) => o.t !== ' ');
+      } else if (k === ' ' || k === 'enter') {
+        const picked = p.hunk ? hunkAt(ops, p.cur) : [p.cur];
+        this.handle(stageLines(w, p.path, p.side, picked));
+        if (this.popup !== p) return;
+        const after = stagingOps(this.host.world(), p.path, p.side);
+        const left = after.map((o, i) => (o.t === ' ' ? -1 : i)).filter((i) => i >= 0);
+        if (!left.length) {
+          const other = p.side === 'unstaged' ? 'staged' : 'unstaged';
+          if (!stagingOps(this.host.world(), p.path, other).some((o) => o.t !== ' ')) this.popup = null;
+          else {
+            p.side = other;
+            p.cur = stagingOps(this.host.world(), p.path, other).findIndex((o) => o.t !== ' ');
+          }
+        } else p.cur = left.find((i) => i >= p.cur) ?? left[left.length - 1];
+      }
     } else if ((p.kind === 'error' || p.kind === 'help') && k === 'enter') this.popup = null;
     e?.preventDefault();
     this.render();
@@ -313,6 +370,12 @@ export class LazyGitView {
           break;
         }
         this.popup = { kind: 'resolve', path: o.path, chunks, picks: new Array(n).fill(null), cur: 0, side: 'ours' };
+        break;
+      }
+      case 'stage': {
+        const w = this.host.world();
+        const side = stagingOps(w, o.path, 'unstaged').some((x) => x.t !== ' ') ? 'unstaged' : 'staged';
+        this.popup = { kind: 'stage', path: o.path, side, cur: stagingOps(w, o.path, side).findIndex((x) => x.t !== ' '), hunk: false };
         break;
       }
       case 'copy':

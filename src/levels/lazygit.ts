@@ -6,7 +6,9 @@ import { runLine } from '../engine/shell';
 import type { World } from '../engine/types';
 import { BASICS } from './basics';
 import { HISTORY } from './history';
-import { shaOf } from './scenario';
+import { Scenario, shaOf } from './scenario';
+import { UNDO } from './undo';
+import { headId, treeOf } from '../engine/repo';
 import { TEAM } from './team';
 import type { Level } from './types';
 
@@ -30,6 +32,11 @@ const conflict = from(TEAM, 'merge-conflict');
 const hotfix = from(TEAM, 'hotfix');
 const cleanup = from(HISTORY, 'rebase-i-cleanup');
 const reword = from(HISTORY, 'rebase-i-reword');
+const rescue = from(UNDO, 'reflog-rescue');
+
+const TOTAL = "function total(items) {\n  let sum = 0;\n  for (const i of items) sum += i.price;\n  return sum;\n}\n";
+const TOTAL_FIXED = TOTAL.replace('i.price;', 'i.price * i.qty;');
+const TOTAL_DEBUG = TOTAL_FIXED.replace('{\n  let', "{\n  console.log('DEBUG', items);\n  let");
 
 const intro = `<p class="lg-note">This level runs in <b>lazygit mode</b>: the terminal is swapped for a lazygit-style screen. Click a panel or press its number, move with <kbd>j</kbd>/<kbd>k</kbd> (or ↑/↓), and press the keys below. Every key runs real git commands, listed in the <b>Command log</b>.</p>`;
 
@@ -138,6 +145,49 @@ export const LAZYGIT: Level[] = [
     solution: ['git switch release/1.0', `git cherry-pick ${shaOf(hotfix.setup(), 'Fix checkout crash on empty cart')}`],
     lesson: 'c / v is cherry-pick as copy and paste. You can copy several commits, even from different branches, and paste them all at once.',
   },
+  {
+    ...rescue,
+    id: 'lg-undo',
+    chapter,
+    title: 'lazygit: undo with z',
+    story: `${intro}<p>Same as <i>Rescue with reflog</i>: a <code>git reset --hard HEAD~2</code> just threw away two commits. In lazygit you don't need to read the reflog yourself.</p>${keys([
+      ['z', 'undo the last action (confirm with enter)'],
+      ['Z', 'redo, if you change your mind'],
+    ])}<p>Watch the command log: lazygit reads the reflog and runs the reset for you. Press <kbd>z</kbd> twice to step further back in time.</p>`,
+    hints: ['Press z. The popup says which action it will undo and which command it runs.', 'Press enter to confirm.'],
+    lesson: 'z / Z walk the reflog: the same "git reflog + git reset --hard HEAD@{1}" rescue, one key each. Like the reflog, it only covers commits and checkouts. Uncommitted changes are never part of it.',
+  },
+  {
+    id: 'lg-partial',
+    chapter,
+    title: 'lazygit: commit half a file',
+    story: `${intro}<p><code>cart.js</code> has two changes: the real fix (multiply by <code>i.qty</code>) and a <code>console.log('DEBUG', …)</code> you still need while testing.</p>
+<p>Commit <b>only the fix</b>. Keep the debug line in your file, uncommitted. With plain git that's <code>git add -p</code>. In lazygit it's a few keys:</p>${keys([
+      ['2 enter', 'open cart.js in the staging view'],
+      ['a', 'switch from single lines to whole hunks'],
+      ['j', 'move to the hunk with the fix'],
+      ['space', 'stage it (it moves to the staged side)'],
+      ['esc c', 'back to files, commit'],
+    ])}`,
+    setup: () =>
+      new Scenario()
+        .run('git init')
+        .commit({ 'cart.js': TOTAL }, 'Add cart total')
+        .write({ 'cart.js': TOTAL_DEBUG }).w,
+    goals: [
+      { text: 'The latest commit has the qty fix', check: (w) => !!treeOf(w, headId(w))['cart.js']?.includes('i.qty') },
+      { text: 'The latest commit has no DEBUG line', check: (w) => !!headId(w) && w.objects[headId(w)!].message !== 'Add cart total' && !treeOf(w, headId(w))['cart.js']?.includes('DEBUG') },
+      { text: 'The DEBUG line is still in your file', check: (w) => !!w.files['cart.js']?.includes('DEBUG') },
+    ],
+    hints: ['In the Files panel (2), select cart.js and press enter.', 'Press a to select whole hunks, then j to reach the "- … i.price;  + … i.qty;" hunk, then space.', 'esc, then c and a message. Only the staged hunk is committed.'],
+    solution: [
+      `echo "${TOTAL_FIXED.trimEnd().replace(/\n/g, '\\n')}" > cart.js`,
+      'git add cart.js',
+      'git commit -m "Count item quantities in total"',
+      `echo "${TOTAL_DEBUG.trimEnd().replace(/\n/g, '\\n')}" > cart.js`,
+    ],
+    lesson: 'Staging works on lines, not just files. The staging view (or git add -p) lets one messy working copy become clean, focused commits. Leftover debug lines stay out of history.',
+  },
 ];
 
 /** regular levels where lazygit mode unlocks once you've beaten them with plain git */
@@ -160,4 +210,5 @@ export const LAZYGIT_UNLOCKABLE = new Set([
   'rebase-i-reword',
   'rebase-i-drop',
   'boss-rebase-hell',
+  'reflog-rescue',
 ]);
