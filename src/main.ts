@@ -5,6 +5,7 @@ import type { Line, World } from './engine/types';
 import { LEVELS, type Level, lazygitMode } from './levels/levels';
 import { type Step, execStep } from './lazygit/model';
 import { LazyGitView, type LogEntry } from './ui/lazygit';
+import { type LevelEntry, buildIndex, search } from './levels/search';
 import { EDITOR, fireEvents, isSolved, safeCheck, startLevel } from './levels/runtime';
 import { renderGraph } from './ui/graph';
 import { esc, renderRemote, renderTrees } from './ui/panels';
@@ -68,6 +69,10 @@ app.innerHTML = `
 </header>
 <main class="layout">
   <section class="panel left">
+    <div class="level-search">
+      <input id="levelSearch" type="search" placeholder="Search: undo, conflict, rebase…" aria-label="Search levels" autocomplete="off" />
+      <button class="btn icon-btn" id="expandBtn" title="Browse all levels in a larger view" aria-label="Browse all levels">⤢</button>
+    </div>
     <nav class="levels" id="levels"></nav>
     <div class="brief" id="brief"></div>
   </section>
@@ -117,17 +122,93 @@ function renderPrompt() {
   $('prompt').innerHTML = `you@laptop ${dir}${branch ? ` <span class="b">(${esc(branch)})</span>` : ''} %`;
 }
 
+const INDEX = buildIndex(LEVELS);
+let query = '';
+
 function renderLevels() {
   let html = '';
   let chapter = '';
-  LEVELS.forEach((l, i) => {
+  const hits = search(INDEX, query);
+  for (const { level: l, index: i } of hits) {
     if (l.chapter !== chapter) {
       chapter = l.chapter;
       html += `<div class="chapter">${esc(chapter)}</div>`;
     }
     html += `<button class="level-item ${l.id === S.level.id ? 'active' : ''}" data-i="${i}"><span class="tick">${completed.has(l.id) ? '✓' : i + 1}</span>${esc(l.title)}</button>`;
-  });
+  }
+  if (query.trim()) {
+    html = `<div class="search-count">${hits.length ? `${hits.length} of ${LEVELS.length} levels match <b>${esc(query.trim())}</b>` : `No levels match <b>${esc(query.trim())}</b>. Try a command (stash, rebase) or a goal (undo, conflict).`}</div>` + html;
+  }
   $('levels').innerHTML = html;
+}
+
+// ───── course map: every chapter and level in a big, searchable modal ─────
+function cardHtml(e: LevelEntry) {
+  const l = e.level;
+  const done = completed.has(l.id);
+  return `<button class="cm-card ${l.id === S.level.id ? 'current' : ''} ${done ? 'done' : ''}" data-i="${e.index}">
+    <div class="cm-card-top"><span class="cm-num">${done ? '✓' : e.index + 1}</span><b>${esc(l.title)}</b></div>
+    <p>${esc(e.blurb)}</p>
+    <div class="cm-tags">${e.teaches.slice(0, 4).map((t) => `<code>${esc(t)}</code>`).join('')}</div>
+  </button>`;
+}
+
+function renderCourseMap(root: HTMLElement) {
+  const q = root.querySelector<HTMLInputElement>('.cm-search')!.value;
+  const hits = search(INDEX, q);
+  const chapters = [...new Set(LEVELS.map((l) => l.chapter))];
+  const body = chapters
+    .map((ch) => {
+      const all = INDEX.filter((e) => e.level.chapter === ch);
+      const shown = hits.filter((e) => e.level.chapter === ch);
+      if (!shown.length) return '';
+      const done = all.filter((e) => completed.has(e.level.id)).length;
+      return `<section class="cm-chapter"><h3>${esc(ch)} <span class="cm-progress">${done}/${all.length} done</span></h3><div class="cm-grid">${shown.map(cardHtml).join('')}</div></section>`;
+    })
+    .join('');
+  root.querySelector('.cm-body')!.innerHTML = body || `<p class="cm-empty">No levels match <b>${esc(q)}</b>. Try a command (stash, rebase, bisect) or a goal (undo, conflict, recover).</p>`;
+  const done = LEVELS.filter((l) => completed.has(l.id)).length;
+  root.querySelector('.cm-count')!.textContent = q.trim() ? `${hits.length} of ${LEVELS.length} levels match` : `${LEVELS.length} levels · ${done} done`;
+}
+
+function openCourseMap() {
+  const back = document.createElement('div');
+  back.className = 'modal-back';
+  back.innerHTML = `<div class="modal cm" role="dialog" aria-label="All levels">
+    <div class="panel-head"><h3>All levels</h3><span class="cm-count"></span><button class="btn" data-x="close" aria-label="Close">✕</button></div>
+    <div class="cm-searchbar"><input class="cm-search" type="search" placeholder="What do you want to learn? e.g. undo a commit, merge conflict, rebase -i" aria-label="Search levels" autocomplete="off" /></div>
+    <div class="cm-body"></div>
+  </div>`;
+  const inp = back.querySelector<HTMLInputElement>('.cm-search')!;
+  inp.value = query;
+  const close = () => {
+    back.remove();
+    document.removeEventListener('keydown', onKey);
+    if (S.mode === 'lazygit') lg.focus();
+    else input.focus({ preventScroll: true });
+  };
+  const onKey = (e: KeyboardEvent) => {
+    if (e.key === 'Escape') close();
+  };
+  document.addEventListener('keydown', onKey);
+  inp.addEventListener('input', () => {
+    query = inp.value;
+    ($('levelSearch') as HTMLInputElement).value = query;
+    renderLevels();
+    renderCourseMap(back);
+  });
+  back.addEventListener('click', (e) => {
+    const t = e.target as HTMLElement;
+    const card = t.closest<HTMLElement>('[data-i]');
+    if (card) {
+      close();
+      loadLevel(Number(card.dataset.i));
+    } else if (t.closest('[data-x="close"]') || t === back) close();
+  });
+  document.body.appendChild(back);
+  renderCourseMap(back);
+  back.querySelector('.cm-card.current')?.scrollIntoView({ block: 'center' });
+  inp.focus();
 }
 
 function renderBrief() {
@@ -489,6 +570,20 @@ $('chips').addEventListener('click', (e) => {
   input.focus();
 });
 $('rewindBtn').addEventListener('click', rewind);
+$('levelSearch').addEventListener('input', (e) => {
+  query = (e.target as HTMLInputElement).value;
+  renderLevels();
+});
+$('levelSearch').addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') {
+    const first = $('levels').querySelector<HTMLElement>('[data-i]');
+    if (first) loadLevel(Number(first.dataset.i));
+  } else if (e.key === 'Escape') {
+    (e.target as HTMLInputElement).value = query = '';
+    renderLevels();
+  }
+});
+$('expandBtn').addEventListener('click', openCourseMap);
 $('modeToggle').addEventListener('click', (e) => {
   const b = (e.target as HTMLElement).closest<HTMLButtonElement>('[data-mode]');
   if (b && !b.disabled) setMode(b.dataset.mode as 'terminal' | 'lazygit');

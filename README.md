@@ -17,6 +17,7 @@ npm test        # engine tests + runs every level's solution
 - `src/levels/`: levels are built by running real commands (`Scenario`), and teammates push via `teammatePush`.
 - `src/ui/`: terminal, SVG commit graph, panels. Vanilla TS, no framework.
 - **lazygit mode** (`src/lazygit/model.ts`, `src/ui/lazygit.ts`): a lazygit-style screen with lazygit's default keys. Every key runs real git commands through the same engine, listed in a command log, so learners see what lazygit does for them. It's always on in the lazygit chapter, and unlocks on many regular levels once you've beaten them with plain git.
+- **Finding levels** (`src/levels/search.ts`): the search box above the level list matches titles, stories, lessons and the commands each level teaches (with a few synonyms, so "undo" finds reset/revert/reflog levels). ⤢ opens every chapter as cards in a large, searchable view.
 - ⏪ **Rewind** is the app's own undo stack, separate from git, so learners can always back out.
 
 See [docs/SCENARIOS.md](docs/SCENARIOS.md) for the level roadmap.
