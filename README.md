@@ -10,6 +10,10 @@ npm run dev     # http://localhost:5173
 npm test        # engine tests + runs every level's solution
 ```
 
+## Deploy
+
+Every push to `main` runs `.github/workflows/deploy.yml`, which runs the tests, builds, and publishes `dist/` to GitHub Pages at https://lordono.github.io/git-learn/. `vite.config.ts` uses a relative `base`, so the build works under any path, and on any static host (Netlify, Vercel, Cloudflare Pages).
+
 ## How it works
 
 - `src/engine/`: a git simulator in TypeScript. It is not real git: it models commits, branches, HEAD, the index, the reflog, stash, merge/rebase/cherry-pick/revert with real line-level conflicts, interactive rebase (the todo list and commit messages open in a sandbox editor), `blame`, `bisect` (with a sandbox `npm test` so `bisect run` works), tags, `clean`, `--ours/--theirs`, `revert -m`, and a fake remote with push rejection, `--force-with-lease`, protected and pull-request-only branches. Output mimics real git, plus 💡 explanations and ⚠️ warnings (e.g. "these uncommitted changes can't be recovered").
