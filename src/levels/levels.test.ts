@@ -178,5 +178,33 @@ describe('bad moves are caught', () => {
     expect(log).toContain('is the first bad commit');
     expect(w.objects[w.repo!.bisect!.found!].message).not.toBe('Refactor cart helpers');
   });
+
+  it('boss friday: pushing webhooks with .env still in history fails the secret goal', () => {
+    const level = byId('boss-friday');
+    const { w, log } = play(level, ['git push', 'git switch -c webhooks', 'git push -u origin webhooks']);
+    expect(log).toContain('pull request');
+    expect(level.goals[1].check(w)).toBe(false);
+  });
+
+  it('boss rebase hell: finishing the rebase rewrites the shared commits', () => {
+    const level = byId('boss-rebase-hell');
+    const { w } = play(level, ['git checkout --theirs cart.js', 'git add cart.js', 'git rebase --continue', 'git push --force-with-lease']);
+    expect(level.goals[1].check(w)).toBe(false);
+  });
+
+  it('boss rm -rf: reset --hard instead of mixed wipes the uncommitted css', () => {
+    const level = byId('boss-rm-rf');
+    const { w, log } = play(level, ['git init', 'git remote add origin https://git.example.com/team/shop.git', 'git fetch', 'git reset --hard origin/main']);
+    expect(log).toContain('thrown away');
+    expect('invoice.css' in w.files).toBe(true); // untracked files survive --hard...
+    expect(w.files['invoice.js']).not.toContain('pdf'); // ...but tracked edits are gone
+  });
+
+  it('boss archaeology: reverting only the first promo commit conflicts', () => {
+    const level = byId('boss-archaeology');
+    const sha = Object.values(startLevel(level).world.objects).find((c) => c.message === 'Add promo banner')!.id.slice(0, 7);
+    const { log } = play(level, [`git revert ${sha}`]);
+    expect(log).toContain('CONFLICT');
+  });
 });
 

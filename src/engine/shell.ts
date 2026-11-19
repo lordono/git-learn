@@ -1,6 +1,6 @@
 import { finishEdit, runGit } from './git';
 import { runTests } from './tests';
-import { Ctx, GitError, clone, firstLine, pathsOf, plural, reachable, short } from './repo';
+import { Ctx, GitError, ancestors, clone, firstLine, pathsOf, plural, reachable, short } from './repo';
 import type { Line, World } from './types';
 
 export type ShellAction = { type: 'edit'; path: string } | { type: 'clear' } | { type: 'hint' };
@@ -188,7 +188,20 @@ function runShell(c: Ctx, words: string[], actions: ShellAction[]) {
 /** Committed or stashed content we can still reach (for "did we just lose work?" checks). */
 function savedContents(w: World): Set<string> {
   const s = new Set<string>();
-  for (const cm of Object.values(w.objects)) for (const v of Object.values(cm.tree)) s.add(v);
+  // only commits this repo can still reach count (the object store is shared with the server and
+  // teammates, and keeps commits from a deleted .git around)
+  const r = w.repo;
+  const tips = r
+    ? [...reachable(w), ...r.reflog.map((e) => e.id), ...(r.origHead ? [r.origHead] : [])]
+    : [];
+  const seen = new Set<string>();
+  for (const t of tips) {
+    for (const id of ancestors(w, t)) {
+      if (seen.has(id)) continue;
+      seen.add(id);
+      for (const v of Object.values(w.objects[id].tree)) s.add(v);
+    }
+  }
   for (const st of [...(w.repo?.stash ?? []), ...(w.repo?.lostStashes ?? [])]) {
     Object.values(st.worktree).forEach((v) => s.add(v));
     Object.values(st.index).forEach((v) => s.add(v));

@@ -997,12 +997,13 @@ function reset(c: Ctx, a: Args) {
     return;
   }
   const target = resolveRev(w, rev);
-  const old = needHead(c);
+  const old = headId(w) ?? '';
+  if (!old && rev === 'HEAD') needHead(c);
   const label = currentBranch(w) ?? 'HEAD';
   const mode = soft ? 'soft' : hard ? 'hard' : 'mixed';
   if (r.op && r.op.kind !== 'rebase' && mode !== 'soft') r.op = undefined;
   if (mode !== 'soft') r.conflicts = [];
-  r.origHead = old;
+  if (old) r.origHead = old;
   if (mode === 'hard') hardReset(w, treeOf(w, target));
   else if (mode === 'mixed') r.index = { ...treeOf(w, target) };
   moveHead(w, target, `reset: moving to ${rev}`);
@@ -1014,13 +1015,13 @@ function reset(c: Ctx, a: Args) {
       st.unstaged.forEach((s) => c.out(`${s.kind === 'deleted' ? 'D' : 'M'}\t${s.path}`));
     }
   }
-  const moved = old === target ? `${label} stayed at ${short(target)}` : `${label} moved from ${short(old)} to ${short(target)}`;
+  const moved = !old ? `${label} (which had no commits) now points at ${short(target)}` : old === target ? `${label} stayed at ${short(target)}` : `${label} moved from ${short(old)} to ${short(target)}`;
   if (mode === 'soft') c.explain(`--soft: ${moved}. Staging area and files untouched, so the changes from the commits you stepped back over are now staged, ready to commit again.`);
   if (mode === 'mixed') c.explain(`--mixed (the default): ${moved} and the staging area was reset to match. Your files still have every change, just unstaged.`);
   if (mode === 'hard') c.explain(`--hard: ${moved}, and the staging area AND your working files were overwritten to match. It's the only reset mode that touches your files.`);
   const br = currentBranch(w);
   const up = br && r.upstream[br] ? r.remoteBranches[r.upstream[br]] : undefined;
-  if (up && old !== target && isAncestor(w, old, up) && !isAncestor(w, old, target)) {
+  if (up && old && old !== target && isAncestor(w, old, up) && !isAncestor(w, old, target)) {
     c.warn(`You moved ${br} behind commits that are already on ${r.upstream[br!]}. A normal push will now be rejected, and forcing it rewrites history teammates may have pulled. For shared branches, git revert is the safer undo.`);
   }
 }

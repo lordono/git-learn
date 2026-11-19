@@ -101,12 +101,15 @@ Levels can define a test suite (`world.tests`: "file X must / must not contain Y
 | | **Find when a function was deleted** | `log -S "fnName"`, then `show` / `restore --source` | 🟢 |
 | | **Blame lies after a big reformat** | `blame <old-commit> file`, or `-w` / ignore-revs | 🟡 `blame -w`, `--ignore-rev` |
 
-## 6. Boss levels (chain several skills)
+## 6. Boss levels (chain several skills) — `boss.ts`
 
-- **Friday 5pm**: wrong branch + unpushed secret + teammate pushed meanwhile.
-- **The rebase from hell**: a 4-commit rebase with 2 conflicts; abort, then redo it with `merge` instead.
-- **Archaeology+**: blame → the culprit commit was a merge → `revert -m 1`, on a protected branch, while a teammate pushes.
-- **`rm -rf .git`**: you deleted the repo. Re-clone 🟡 (`clone`) and recover unpushed work from… nowhere. The lesson: push your branches.
+| # | Scenario | Skills chained |
+|---|---|---|
+| ✅ | **Friday, 5pm**: committed on PR-only main + live secret in a commit + Alex pushed | `switch -c`, `rebase -i` edit → `rm --cached` + `.gitignore` + amend, `fetch`, `branch -f`, `rebase`, `push -u` |
+| ✅ | **The rebase from hell**: 4 commits, same lines conflict twice, branch is shared | `rebase --abort`, `merge`, one resolution, push without force |
+| ✅ | **Kill the promo banner**: blame lands on a commit that came in via a merge, main protected, Alex pushes mid-way | `blame`, `log`, `revert -m 1`, rejected push → `pull --rebase` → `push` |
+| ✅ | **`rm -rf .git`**: repo gone, files (and unpushed work) still on disk | `init`, `remote add`, `fetch`, `reset` (mixed!) `origin/main`, `branch -u`, commit, push |
+| | **Archaeology++**: the culprit is found with bisect, but it was squash-merged | `bisect run`, `revert`, explain squash merges |
 
 ## Engine backlog (unlocks 🟡 levels)
 
