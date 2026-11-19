@@ -55,6 +55,9 @@ export function renderGraph(w: World): string {
   for (const [b, id] of Object.entries(r.branches)) add(id, { text: b === cur ? `HEAD → ${b}` : b, kind: b === cur ? 'head' : 'branch' });
   for (const [b, id] of Object.entries(r.remoteBranches)) add(id, { text: b, kind: 'remote' });
   for (const [t, id] of Object.entries(r.tags ?? {})) add(id, { text: `🏷 ${t}`, kind: 'tag' });
+  if (r.bisect?.bad) add(r.bisect.bad, { text: 'bisect: bad', kind: 'lost' });
+  for (const g of r.bisect?.good ?? []) add(g, { text: 'bisect: good', kind: 'tag' });
+  if (r.bisect?.found) add(r.bisect.found, { text: '🐞 first bad', kind: 'lost' });
   r.stash.forEach((s, i) => add(s.base, { text: `stash@{${i}} base`, kind: 'stash' }));
   for (const id of dangling) {
     const tipOfDangling = !shown.some((c) => dangling.has(c.id) && c.parents.includes(id));

@@ -1,4 +1,5 @@
 import { finishEdit, runGit } from './git';
+import { runTests } from './tests';
 import { Ctx, GitError, clone, firstLine, pathsOf, plural, reachable, short } from './repo';
 import type { Line, World } from './types';
 
@@ -161,8 +162,15 @@ function runShell(c: Ctx, words: string[], actions: ShellAction[]) {
     case 'hint':
       actions.push({ type: 'hint' });
       return;
+    case 'npm': {
+      if (args[0] !== 'test' && !(args[0] === 'run' && args[1] === 'test')) throw new GitError(`npm error the sandbox only knows "npm test"`);
+      const t = runTests(c.w);
+      t.lines.forEach((l) => l.text.split('\n').forEach((text) => c.print(l.kind, text)));
+      if (!t.ok) c.ok = false;
+      return;
+    }
     case 'help':
-      c.out('Shell: ls, cat <file>, echo "text" > file, echo "more" >> file, nano <file>, touch, rm, mv, clear, hint');
+      c.out('Shell: ls, cat <file>, echo "text" > file, echo "more" >> file, nano <file>, touch, rm, mv, clear, npm test, hint');
       c.out('Git:   git help, or git <command> -h');
       c.out('Tips:  ↑/↓ history · Tab completes · && chains commands');
       return;

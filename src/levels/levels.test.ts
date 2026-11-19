@@ -164,5 +164,19 @@ describe('bad moves are caught', () => {
     const { w } = play(level, ['git revert HEAD~1 --no-edit']);
     expect(level.goals[0].check(w)).toBe(false);
   });
+
+  it('reverting the newest shipping commit instead of the culprit loses express shipping', () => {
+    const level = byId('blame-fee');
+    const { w } = play(level, ['git revert HEAD~1 --no-edit', 'git push']);
+    expect(level.goals[0].check(w)).toBe(false);
+    expect(level.goals[1].check(w)).toBe(false);
+  });
+
+  it('answering bisect wrongly blames an innocent commit', () => {
+    const level = byId('bisect-manual');
+    const { w, log } = play(level, ['git bisect start', 'git bisect bad', 'git bisect good v1.0', 'git bisect bad', 'git bisect bad', 'git bisect bad', 'git bisect bad']);
+    expect(log).toContain('is the first bad commit');
+    expect(w.objects[w.repo!.bisect!.found!].message).not.toBe('Refactor cart helpers');
+  });
 });
 

@@ -2,7 +2,7 @@
 
 Levels already playable are marked ✅. The rest are ideas. **Engine** says whether the simulator can already run the scenario (🟢 ready, just write the level) or needs a new feature (🟡, named in the cell).
 
-Each level = a `setup()` that builds the world with real commands, an optional `prelude` (commands "you already typed", replayed in the terminal so the learner sees how the mess happened), optional `events` (teammates pushing mid-level), plus `goals` (checks on the final state), `hints`, `solution` and a one-paragraph `lesson`. Levels live in `src/levels/basics.ts`, `undo.ts`, `team.ts`, `pack2.ts` (the levels that use tags, `clean`, `--ours/--theirs`, `revert -m` and friends) and `history.ts` (interactive rebase). A solution step that starts with `✎ ` is text saved in the editor git opened (rebase todo or commit message), not a terminal command. Every level's solution is run by `npm test`.
+Each level = a `setup()` that builds the world with real commands, an optional `prelude` (commands "you already typed", replayed in the terminal so the learner sees how the mess happened), optional `events` (teammates pushing mid-level), plus `goals` (checks on the final state), `hints`, `solution` and a one-paragraph `lesson`. Levels live in `src/levels/basics.ts`, `undo.ts`, `team.ts`, `pack2.ts` (the levels that use tags, `clean`, `--ours/--theirs`, `revert -m` and friends) `history.ts` (interactive rebase) and `detective.ts` (blame and bisect). A solution step that starts with `✎ ` is text saved in the editor git opened (rebase todo or commit message), not a terminal command. Every level's solution is run by `npm test`.
 
 ---
 
@@ -36,7 +36,7 @@ Each level = a `setup()` that builds the world with real commands, an optional `
 | ✅ | **Dropped a stash by mistake** | use the sha printed by `stash drop` (or `fsck --lost-found`) → `stash apply <sha>` | 🟢 |
 | ✅ | **Throw away untracked junk** (but keep notes.md and .env) | `git clean -nd` (dry run!) then `-fd <paths>` | 🟢 |
 | ✅ | **Squash 4 "wip" commits before opening a PR** | `reset --soft main` + one commit | 🟢 (a `rebase -i` version needs 🟡 interactive rebase UI) |
-| | **Which commit broke it?** | `git bisect` with a fake test command | 🟡 `bisect` |
+| ✅ | **Which commit broke it?** | `git bisect` with the sandbox `npm test` (see chapter 5) | 🟢 |
 
 ## 3. Team life (other people exist)
 
@@ -88,18 +88,31 @@ Each level = a `setup()` that builds the world with real commands, an optional `
 | | **Oops, squashed the wrong commits** | `reset --hard ORIG_HEAD` (or reflog) and redo | 🟢 |
 | | **`fixup!` commits + `--autosquash`** | `commit --fixup <sha>`, `rebase -i --autosquash` | 🟡 `--fixup`, `--autosquash` |
 
-## 5. Boss levels (chain several skills)
+## 5. Detective work (blame, log filters, bisect)
+
+Levels can define a test suite (`world.tests`: "file X must / must not contain Y"), which the sandbox `npm test` runs. That makes `git bisect run npm test` work.
+
+| # | Scenario | What the learner does | Engine |
+|---|---|---|---|
+| ✅ | **Who changed the shipping fee, and why?** | `blame` → `show` → `revert` just that commit → `push` | 🟢 |
+| ✅ | **Which commit broke the tests?** (11 commits, innocent-looking messages) | `bisect start/bad/good v1.0`, `npm test` at each step, `reset`, `revert` | 🟢 |
+| ✅ | **Let git find it** (30 commits, protected main) | `bisect start HEAD v2.0`, `bisect run npm test`, `revert`, `push` | 🟢 |
+| | **A commit in the middle doesn't even build** | `bisect skip` | 🟢 (needs a "can't test" signal, e.g. exit 125) |
+| | **Find when a function was deleted** | `log -S "fnName"`, then `show` / `restore --source` | 🟢 |
+| | **Blame lies after a big reformat** | `blame <old-commit> file`, or `-w` / ignore-revs | 🟡 `blame -w`, `--ignore-rev` |
+
+## 6. Boss levels (chain several skills)
 
 - **Friday 5pm**: wrong branch + unpushed secret + teammate pushed meanwhile.
 - **The rebase from hell**: a 4-commit rebase with 2 conflicts; abort, then redo it with `merge` instead.
-- **Archaeology**: find who changed a line and why (`log`, `show`, `blame` 🟡), then revert just that commit.
+- **Archaeology+**: blame → the culprit commit was a merge → `revert -m 1`, on a protected branch, while a teammate pushes.
 - **`rm -rf .git`**: you deleted the repo. Re-clone 🟡 (`clone`) and recover unpushed work from… nowhere. The lesson: push your branches.
 
 ## Engine backlog (unlocks 🟡 levels)
 
-Done: `rebase -i` (todo editor, reword/edit/squash/fixup/drop, `--edit-todo`), `git commit` without `-m` opens the editor, `revert -m`, `--ours/--theirs`, modify/delete conflicts, `tag`, `clean`, `fsck --lost-found`, `stash apply <sha>`, `commit --reset-author`, pull-request-only branches.
+Done: `blame` (incl. `-L`, uncommitted lines), `bisect` (start/good/bad/skip/run/log/reset), `log -S` and `log -- <path>`, sandbox `npm test`, `rebase -i` (todo editor, reword/edit/squash/fixup/drop, `--edit-todo`), `git commit` without `-m` opens the editor, `revert -m`, `--ours/--theirs`, modify/delete conflicts, `tag`, `clean`, `fsck --lost-found`, `stash apply <sha>`, `commit --reset-author`, pull-request-only branches.
 
-1. `blame`, `bisect`, `clone`, multiple remotes (`upstream` for forks)
+1. `clone`, multiple remotes (`upstream` for forks)
 2. `git diff` during a conflict (combined view)
 3. `commit --fixup` + `rebase -i --autosquash`, `rebase --onto`
 

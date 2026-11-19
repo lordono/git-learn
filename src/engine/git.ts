@@ -1,5 +1,6 @@
 import { COMMAND_DOCS } from './docs';
-import { diffLines, hasConflictMarkers, merge3, mergeTrees } from './merge';
+import { diffLines, hasConflictMarkers, lcsPairs, merge3, mergeTrees, splitLines } from './merge';
+import { runTests } from './tests';
 import {
   Ctx,
   GitError,
@@ -338,6 +339,10 @@ function status(c: Ctx, a: Args) {
   } else {
     c.out(`HEAD detached at ${short(headId(w)!)}`);
   }
+  if (r.bisect) {
+    const st = r.bisect.start;
+    c.out(`You are currently bisecting, started from ${st.kind === 'branch' ? `branch '${st.name}'` : short(st.id)}.\n  (use "git bisect reset" to get back to the original branch)\n`);
+  }
   if (!headId(w)) c.out('\nNo commits yet');
   if (op?.kind === 'merge') {
     if (st.conflicts.length) c.out('\nYou have unmerged paths.\n  (fix conflicts and run "git commit")\n  (use "git merge --abort" to abort the merge)');
@@ -540,10 +545,19 @@ function log(c: Ctx, a: Args) {
     n = Number(numFlag.slice(1));
     a.rest = a.rest.filter((x) => x !== numFlag);
   }
-  a.dashdash();
+  const pickaxe = a.opt('-S');
+  const paths = a.dashdash() ?? [];
   a.noUnknownFlags('log');
   const includes: string[] = [];
   const excludes: string[] = [];
+  // a bare argument that isn't a revision but is a file: treat it as a path (like git does)
+  a.rest = a.rest.filter((arg) => {
+    if (!tryResolve(w, arg) && !arg.includes('..') && (arg in w.files || arg in headTree(w))) {
+      paths.push(arg);
+      return false;
+    }
+    return true;
+  });
   for (const arg of a.rest) {
     if (arg.includes('..')) {
       const [x, y] = arg.split('..');
@@ -554,7 +568,18 @@ function log(c: Ctx, a: Args) {
   }
   if (all) includes.push(...Object.values(r.branches), ...Object.values(r.remoteBranches));
   if (!includes.length) includes.push(needHead(c));
-  const commits = collectLog(w, includes, excludes).slice(0, n);
+  const count = (t: FileMap, s: string) => Object.values(t).reduce((k, v) => k + v.split(s).length - 1, 0);
+  const commits = collectLog(w, includes, excludes)
+    .filter((cm) => {
+      const parent = treeOf(w, cm.parents[0]);
+      if (paths.length && !paths.some((p) => parent[p] !== cm.tree[p])) return false;
+      if (pickaxe !== undefined && count(parent, pickaxe) === count(cm.tree, pickaxe)) return false;
+      return true;
+    })
+    .slice(0, n);
+  if (pickaxe !== undefined || paths.length) {
+    c.explain(`${pickaxe !== undefined ? `-S "${pickaxe}" lists commits that added or removed that text` : `Only commits that changed ${paths.join(', ')}`}: ${plural(commits.length, 'commit')}.`);
+  }
   const deco = decorations(w);
   const g = graph ? '* ' : '';
   for (const cm of commits) {
@@ -1528,6 +1553,231 @@ function pickLike(c: Ctx, a: Args, kind: 'cherry-pick' | 'revert') {
   }
 }
 
+// ─── blame ───
+
+const isoDate = (t: number) => new Date(t).toISOString().replace('T', ' ').replace(/\.\d+Z$/, ' +0000');
+
+/** For each line of `path` at commit `start`: the commit that last changed it. */
+export function blameCommit(w: World, start: string, path: string): string[] {
+  const lines = splitLines(treeOf(w, start)[path] ?? '');
+  const owner: string[] = new Array(lines.length);
+  // commit id -> [indexInTarget, indexInThisCommitsVersion][]
+  const pending = new Map<string, Array<[number, number]>>([[start, lines.map((_, i) => [i, i] as [number, number])]]);
+  while (pending.size) {
+    const id = [...pending.keys()].sort((a, b) => w.objects[b].seq - w.objects[a].seq)[0];
+    const todo = pending.get(id)!;
+    pending.delete(id);
+    const cm = w.objects[id];
+    const mine = splitLines(cm.tree[path] ?? '');
+    let left = todo;
+    for (const p of cm.parents) {
+      const pc = treeOf(w, p)[path];
+      if (pc === undefined || !left.length) continue;
+      const match = new Map(lcsPairs(mine, splitLines(pc)));
+      const pass = left.filter(([, li]) => match.has(li));
+      left = left.filter(([, li]) => !match.has(li));
+      if (pass.length) pending.set(p, [...(pending.get(p) ?? []), ...pass.map(([ti, li]) => [ti, match.get(li)!] as [number, number])]);
+    }
+    for (const [ti] of left) owner[ti] = id;
+  }
+  return owner;
+}
+
+function blame(c: Ctx, a: Args) {
+  const w = c.w;
+  const range = a.opt('-L');
+  const dd = a.dashdash();
+  a.noUnknownFlags('blame');
+  const args = [...a.rest, ...(dd ?? [])];
+  const path = args.pop();
+  if (!path) throw new GitError('usage: git blame [-L <start>,<end>] [<rev>] [--] <file>');
+  const rev = args[0];
+  const start = rev ? resolveRev(w, rev) : needHead(c);
+  const committed = treeOf(w, start)[path];
+  if (committed === undefined) {
+    if (path in w.files) throw new GitError(`fatal: no such path '${path}' in ${rev ?? 'HEAD'}`, `hint: ${path} has never been committed, so it has no history yet`);
+    throw new GitError(`fatal: no such path '${path}' in ${rev ?? 'HEAD'}`);
+  }
+  const owners = blameCommit(w, start, path);
+  let shown = splitLines(committed).map((text, i) => ({ text, id: owners[i] as string | null }));
+  if (!rev && path in w.files && w.files[path] !== committed) {
+    // blame the file on disk: lines you changed but didn't commit belong to nobody yet
+    const disk = splitLines(w.files[path]);
+    const match = new Map(lcsPairs(disk, shown.map((x) => x.text)));
+    shown = disk.map((text, i) => ({ text, id: match.has(i) ? shown[match.get(i)!].id : null }));
+  }
+  let from = 1;
+  let to = shown.length;
+  if (range) {
+    const m = range.match(/^(\d+)(?:,(\+?)(\d+))?$/);
+    if (!m) throw new GitError(`fatal: invalid -L range '${range}'`);
+    from = Number(m[1]);
+    to = m[3] === undefined ? from : m[2] ? from + Number(m[3]) - 1 : Number(m[3]);
+    if (from < 1 || from > shown.length) throw new GitError(`fatal: file ${path} has only ${plural(shown.length, 'line')}`);
+    to = Math.min(to, shown.length);
+  }
+  const rows = shown.slice(from - 1, to);
+  const who = (id: string | null) => (id ? w.objects[id].author : 'Not Committed Yet');
+  const width = Math.max(...rows.map((x) => who(x.id).length));
+  const numW = String(to).length;
+  rows.forEach((x, i) => {
+    const cm = x.id ? w.objects[x.id] : null;
+    const sha = cm ? `${cm.parents.length ? ' ' : '^'}${short(cm.id)}` : ' 0000000';
+    const date = cm ? isoDate(cm.time) : isoDate(Date.UTC(2026, 11, 31, 23, 59));
+    c.out(`${sha} (${who(x.id).padEnd(width)} ${date} ${String(from + i).padStart(numW)}) ${x.text}`);
+  });
+  const ids = [...new Set(rows.map((x) => x.id).filter((x): x is string => !!x))];
+  c.explain(`Each line shows the last commit that changed it, who made it, and when. ^ marks the very first commit. To see WHY, read the commit: git show ${short(ids[ids.length - 1] ?? start)}`);
+}
+
+// ─── bisect ───
+
+function bisectCheckout(c: Ctx, id: string) {
+  const w = c.w;
+  const r = R(c);
+  const from = currentBranch(w) ?? short(headId(w)!);
+  carryTo(w, treeOf(w, id), 'checkout', 'checkout');
+  r.head = { kind: 'detached', id };
+  r.reflog.push({ id, msg: `checkout: moving from ${from} to ${id}` });
+}
+
+/** where bisect stands: print status, check out the next commit, or announce the culprit */
+function bisectNext(c: Ctx) {
+  const w = c.w;
+  const b = R(c).bisect!;
+  if (!b.bad || !b.good.length) {
+    c.out(!b.bad && !b.good.length ? 'status: waiting for both good and bad commits' : b.bad ? 'status: waiting for good commit(s), bad commit known' : `status: waiting for bad commit, ${plural(b.good.length, 'good commit')} known`);
+    return;
+  }
+  if (b.good.some((g) => isAncestor(w, b.bad!, g))) {
+    throw new GitError(`Some good revs are not ancestors of the bad rev.`, 'git bisect cannot work properly in this case.', 'Maybe you mistook good and bad revs?');
+  }
+  const goodSide = new Set<string>();
+  for (const g of b.good) for (const id of ancestors(w, g)) goodSide.add(id);
+  const cands = [...ancestors(w, b.bad)].filter((id) => !goodSide.has(id));
+  if (cands.length === 1) return bisectFound(c, cands[0]);
+  const testable = cands.filter((id) => id !== b.bad && !b.skip.includes(id));
+  if (!testable.length) {
+    c.out("There are only 'skip'ped commits left to test.\nThe first bad commit could be any of:");
+    cands.filter((id) => id !== b.bad).forEach((id) => c.out(id));
+    c.out(b.bad);
+    c.err('We cannot bisect more!');
+    c.ok = false;
+    return;
+  }
+  const N = cands.length;
+  const below = (id: string) => cands.filter((x) => isAncestor(w, x, id)).length;
+  const pick = testable.map((id) => ({ id, score: Math.min(below(id), N - below(id)) })).sort((x, y) => y.score - x.score || w.objects[x.id].seq - w.objects[y.id].seq)[0].id;
+  bisectCheckout(c, pick);
+  const left = Math.floor((N - 1) / 2);
+  c.out(`Bisecting: ${plural(left, 'revision')} left to test after this (roughly ${plural(Math.max(0, Math.ceil(Math.log2(left + 1))), 'step')})`);
+  c.out(`[${pick}] ${firstLine(w.objects[pick].message)}`);
+}
+
+function bisectFound(c: Ctx, id: string) {
+  const w = c.w;
+  const b = R(c).bisect!;
+  const cm = w.objects[id];
+  b.found = id;
+  c.out(`${id} is the first bad commit`);
+  c.out(`commit ${id}\nAuthor: ${cm.author} <${cm.email}>\nDate:   ${formatDate(cm.time)}\n`);
+  cm.message.split('\n').forEach((l) => c.out(`    ${l}`));
+  c.out('');
+  statLines(treeOf(w, cm.parents[0]), cm.tree).forEach((l) => c.out(` ${l}`));
+  c.explain(`Found it after ${plural(b.steps, 'test')}: ${short(id)} "${firstLine(cm.message)}" by ${cm.author}. Note the id, then git bisect reset to go back to where you started. From there: git show ${short(id)} to understand it, git revert ${short(id)} to undo it.`);
+}
+
+function bisectMark(c: Ctx, kind: 'good' | 'bad' | 'skip', revs: string[]) {
+  const w = c.w;
+  const b = R(c).bisect;
+  if (!b) throw new GitError('You need to start by "git bisect start"', '', 'You then need to give me at least one good and one bad revision.', '(You can use "git bisect bad" and "git bisect good" for that.)');
+  const ids = (revs.length ? revs : ['HEAD']).map((x) => resolveRev(w, x));
+  for (const id of ids) {
+    if (kind === 'bad') b.bad = id;
+    else if (kind === 'good') b.good.push(id);
+    else b.skip.push(id);
+  }
+  if (kind !== 'skip' && headId(w) === ids[0] && (b.bad && b.good.length)) b.steps++;
+  bisectNext(c);
+}
+
+function bisect(c: Ctx, a: Args) {
+  const w = c.w;
+  const r = R(c);
+  const sub = a.rest.shift();
+  const alias: Record<string, string> = { new: 'bad', old: 'good' };
+  const cmd = alias[sub ?? ''] ?? sub;
+  switch (cmd) {
+    case 'start': {
+      a.dashdash();
+      if (r.bisect) bisectReset(c, true);
+      needHead(c);
+      if (r.op) guardOp(c);
+      r.bisect = { start: { ...r.head }, good: [], skip: [], steps: 0 };
+      const [bad, ...good] = a.rest;
+      if (bad) r.bisect.bad = resolveRev(w, bad);
+      for (const g of good) r.bisect.good.push(resolveRev(w, g));
+      c.explain('Bisect started. Tell git one commit that is broken (git bisect bad, usually the current one) and one that worked (git bisect good <tag or sha>). Git then checks out the commit halfway between for you to test.');
+      return bisectNext(c);
+    }
+    case 'bad':
+    case 'good':
+    case 'skip':
+      return bisectMark(c, cmd, a.rest);
+    case 'reset':
+      return bisectReset(c, false);
+    case 'log': {
+      const b = r.bisect;
+      if (!b) throw new GitError('We are not bisecting.');
+      if (b.bad) c.out(`# bad: [${b.bad}] ${firstLine(w.objects[b.bad].message)}`);
+      b.good.forEach((g) => c.out(`# good: [${g}] ${firstLine(w.objects[g].message)}`));
+      b.skip.forEach((g) => c.out(`# skip: [${g}] ${firstLine(w.objects[g].message)}`));
+      if (b.found) c.out(`# first bad commit: [${b.found}] ${firstLine(w.objects[b.found].message)}`);
+      return;
+    }
+    case 'run': {
+      const b = r.bisect;
+      if (!b || !b.bad || !b.good.length) throw new GitError("error: bisect run failed: no 'good' and 'bad' commits yet", 'hint: git bisect bad, then git bisect good <commit>, then git bisect run npm test');
+      if (a.rest.join(' ') !== 'npm test') throw new GitError(`error: the sandbox can only run 'npm test' (you asked for '${a.rest.join(' ')}')`);
+      for (let i = 0; i < 64 && !b.found; i++) {
+        c.out("running  'npm' 'test'");
+        const t = runTests(w);
+        t.lines.forEach((l) => l.text.split('\n').forEach((text) => c.print(l.kind, text)));
+        const before = headId(w);
+        bisectMark(c, t.ok ? 'good' : 'bad', []);
+        if (!c.ok || (!b.found && headId(w) === before)) break;
+      }
+      if (b.found) c.out('bisect found first bad commit');
+      return;
+    }
+    case undefined:
+    case 'help':
+      return help(c, 'bisect');
+    default:
+      throw new GitError(`error: unknown subcommand: '${sub}'`, 'usage: git bisect [start|bad|good|skip|reset|log|run]');
+  }
+}
+
+function bisectReset(c: Ctx, quiet: boolean) {
+  const w = c.w;
+  const r = R(c);
+  const b = r.bisect;
+  if (!b) {
+    if (!quiet) c.out('We are not bisecting.');
+    return;
+  }
+  const cur = headId(w)!;
+  const target = b.start.kind === 'branch' ? r.branches[b.start.name] : b.start.id;
+  carryTo(w, treeOf(w, target), 'checkout', 'checkout');
+  r.head = { ...b.start };
+  r.reflog.push({ id: target, msg: `checkout: moving from ${cur} to ${b.start.kind === 'branch' ? b.start.name : target}` });
+  r.bisect = undefined;
+  if (quiet) return;
+  if (cur !== target) c.out(`Previous HEAD position was ${short(cur)} ${firstLine(w.objects[cur].message)}`);
+  c.out(b.start.kind === 'branch' ? `Switched to branch '${b.start.name}'` : `HEAD is now at ${short(target)}`);
+  c.explain(`Bisect finished: you're back where you started.${b.found ? ` The culprit was ${short(b.found)} "${firstLine(w.objects[b.found].message)}".` : ''}`);
+}
+
 // ─── tag ───
 
 function tag(c: Ctx, a: Args) {
@@ -2227,6 +2477,8 @@ const COMMANDS: Record<string, (c: Ctx, a: Args) => void> = {
   stash,
   tag,
   clean,
+  blame,
+  bisect,
   fsck,
   fetch,
   pull,

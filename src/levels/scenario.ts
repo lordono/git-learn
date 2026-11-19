@@ -4,6 +4,8 @@ import type { World } from '../engine/types';
 
 export const ORIGIN_URL = 'https://git.example.com/team/shop.git';
 
+export const YOU = { name: 'You', email: 'you@example.com' };
+
 export const TEAMMATES = {
   alex: { name: 'Alex', email: 'alex@example.com' },
   sam: { name: 'Sam', email: 'sam@example.com' },
@@ -32,6 +34,13 @@ export class Scenario {
   /** run a command that is expected to fail (e.g. a rebase that stops on a conflict) */
   runExpectFail(line: string) {
     this.w = runLine(this.w, line).world;
+    return this;
+  }
+
+  /** make the next commits as someone else (until the next `as`) */
+  as(who: { name: string; email: string }) {
+    this.w.globalConfig['user.name'] = who.name;
+    this.w.globalConfig['user.email'] = who.email;
     return this;
   }
 
@@ -136,4 +145,11 @@ export function todoFor(w: World, steps: [string, string][]): string {
       return `${cmd} ${c.id.slice(0, 7)} ${msg}`;
     })
     .join('\n');
+}
+
+/** short id of the commit with this message (levels are deterministic, so solutions can name it) */
+export function shaOf(w: World, msg: string): string {
+  const c = Object.values(w.objects).find((x) => x.message === msg);
+  if (!c) throw new Error(`shaOf: no commit "${msg}"`);
+  return c.id.slice(0, 7);
 }

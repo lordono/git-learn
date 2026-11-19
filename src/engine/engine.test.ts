@@ -261,3 +261,69 @@ describe('interactive rebase', () => {
     expect(saveEditor(opened, '# only comments\n').lines[0].text).toContain('empty commit message');
   });
 });
+
+describe('archaeology: blame, log filters, bisect', () => {
+  const history = () => {
+    const s = new Scenario().run('git init').commit({ 'f.txt': 'a\nb\nc\n' }, 'one');
+    s.w.globalConfig['user.name'] = 'Alex';
+    s.commit({ 'f.txt': 'a\nB\nc\n' }, 'two');
+    s.w.globalConfig['user.name'] = 'You';
+    s.write({ 'f.txt': 'a\nB\nc\nd\n' });
+    return s.w;
+  };
+  it('blame attributes each line to the commit that last changed it', () => {
+    const { out } = sh(history(), 'git blame f.txt');
+    const lines = out.split('\n').filter((l) => l.includes(') '));
+    expect(lines[0]).toMatch(/^\^\w{7} \(You\s/);
+    expect(lines[1]).toMatch(/\(Alex .* 2\) B$/);
+    expect(lines[3]).toContain('Not Committed Yet');
+    expect(sh(history(), 'git blame -L 2,2 f.txt').out.split('\n').filter((l) => l.includes(') '))).toHaveLength(1);
+  });
+  it('blame follows lines through merges', () => {
+    const s = new Scenario().run('git init').commit({ 'f.txt': '1\n2\n3\n' }, 'base').run('git switch -c side');
+    s.commit({ 'f.txt': '1\n2\nside\n' }, 'side change').run('git switch main').commit({ 'f.txt': 'main\n2\n3\n' }, 'main change').run('git merge side -m merge');
+    const { out } = sh(s.w, 'git blame f.txt');
+    const msgOf = (sha: string) => Object.values(s.w.objects).find((c) => c.id.startsWith(sha))!.message;
+    const shas = out.split('\n').filter((l) => l.includes(') ')).map((l) => l.trim().replace('^', '').slice(0, 7));
+    expect(shas.map(msgOf)).toEqual(['main change', 'base', 'side change']);
+  });
+  it('log -- path and log -S filter commits', () => {
+    const s = new Scenario().run('git init').commit({ 'a.txt': 'x\n' }, 'add a').commit({ 'b.txt': 'FEE = 5\n' }, 'add b').commit({ 'a.txt': 'y\n' }, 'edit a');
+    expect(sh(s.w, 'git log --oneline -- b.txt').out).not.toContain('edit a');
+    expect(sh(s.w, 'git log --oneline a.txt').out).toContain('edit a');
+    expect(sh(s.w, 'git log --oneline -S FEE').out.split('\n').filter((l) => /^\w{7} /.test(l))).toHaveLength(1);
+  });
+  const bisectWorld = () => {
+    const s = new Scenario().run('git init');
+    for (let i = 1; i <= 8; i++) s.commit({ 'n.txt': `${i}\n`, 'ok.txt': i >= 6 ? 'broken\n' : 'fine\n' }, `c${i}`);
+    s.w.tests = [{ name: 'works', file: 'ok.txt', includes: 'fine' }];
+    return s.w;
+  };
+  it('npm test runs the sandbox test suite', () => {
+    const { out } = sh(bisectWorld(), 'npm test');
+    expect(out).toContain('✗ works');
+    expect(runLine(bisectWorld(), 'npm test').ok).toBe(false);
+  });
+  it('manual bisect narrows to the first bad commit, reset goes home', () => {
+    let { w, out } = sh(bisectWorld(), 'git bisect start', 'git bisect bad', 'git bisect good HEAD~7');
+    expect(out).toContain('Bisecting:');
+    for (let i = 0; i < 6 && !w.repo!.bisect!.found; i++) {
+      w = sh(w, `git bisect ${w.files['ok.txt'] === 'fine\n' ? 'good' : 'bad'}`).w;
+    }
+    expect(w.objects[w.repo!.bisect!.found!].message).toBe('c6');
+    const back = sh(w, 'git bisect reset');
+    expect(back.out).toContain("Switched to branch 'main'");
+    expect(back.w.repo!.head).toEqual({ kind: 'branch', name: 'main' });
+    expect(back.w.repo!.bisect).toBeUndefined();
+  });
+  it('bisect run finds it automatically', () => {
+    const { w, out } = sh(bisectWorld(), 'git bisect start HEAD HEAD~7', 'git bisect run npm test');
+    expect(out).toContain('is the first bad commit');
+    expect(out).toContain('bisect found first bad commit');
+    expect(w.objects[w.repo!.bisect!.found!].message).toBe('c6');
+  });
+  it('bisect complains when good and bad are swapped, and needs start', () => {
+    expect(sh(bisectWorld(), 'git bisect good').out).toContain('git bisect start');
+    expect(sh(bisectWorld(), 'git bisect start HEAD~7 HEAD').out).toContain('mistook good and bad');
+  });
+});

@@ -16,6 +16,7 @@ export function promptParts(w: World): { dir: string; branch: string } {
   else if (op?.kind === 'merge') label += '|MERGING';
   else if (op?.kind === 'cherry-pick') label += '|CHERRY-PICKING';
   else if (op?.kind === 'revert') label += '|REVERTING';
+  if (r.bisect) label += '|BISECTING';
   return { dir: 'project', branch: label };
 }
 
@@ -28,7 +29,7 @@ export function cmdHtml(cmd: string, w: World): string {
   return `<div class="term-line k-cmd"><span class="p">you@laptop ${dir}</span>${branch ? ` <span class="b">(${esc(branch)})</span>` : ''} % ${esc(cmd)}</div>`;
 }
 
-const SHELL_CMDS = ['git', 'ls', 'cat', 'echo', 'nano', 'touch', 'rm', 'mv', 'clear', 'hint', 'help'];
+const SHELL_CMDS = ['git', 'ls', 'cat', 'echo', 'nano', 'touch', 'rm', 'mv', 'clear', 'npm', 'hint', 'help'];
 const GIT_FLAGS: Record<string, string[]> = {
   reset: ['--soft', '--mixed', '--hard'],
   rebase: ['-i', '--continue', '--abort', '--skip', '--edit-todo'],
@@ -44,6 +45,8 @@ const GIT_FLAGS: Record<string, string[]> = {
   config: ['--global', 'user.name', 'user.email', 'pull.rebase', '--list'],
   branch: ['-d', '-D', '-vv', '-a', '-m'],
   switch: ['-c'],
+  bisect: ['start', 'good', 'bad', 'skip', 'reset', 'log', 'run'],
+  blame: ['-L'],
 };
 
 /** Tab completion: returns the completed line, or a list of options if ambiguous. */

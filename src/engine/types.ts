@@ -90,6 +90,18 @@ export interface Repo {
   /** stash entries that were dropped or popped: unreachable but still in the object store */
   lostStashes?: StashEntry[];
   pendingEdit?: PendingEdit;
+  bisect?: BisectState;
+}
+
+export interface BisectState {
+  /** where `git bisect reset` goes back to */
+  start: Head;
+  bad?: string;
+  good: string[];
+  skip: string[];
+  /** the answer, once found */
+  found?: string;
+  steps: number;
 }
 
 /** The shared server everyone pushes to (e.g. GitHub). */
@@ -113,6 +125,17 @@ export interface World {
   repo: Repo | null;
   remote: RemoteRepo | null;
   globalConfig: Record<string, string>;
+  /** the project's test suite, run by the sandbox `npm test` (checks on the working directory) */
+  tests?: TestCase[];
+}
+
+export interface TestCase {
+  name: string;
+  file: string;
+  /** passes when the file contains this text… */
+  includes?: string;
+  /** …and does not contain this text */
+  excludes?: string;
 }
 
 export type LineKind =

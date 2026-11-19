@@ -21,7 +21,7 @@ export const COMMAND_DOCS: Record<string, { summary: string; usage: string[] }> 
     summary: 'Save the staging area as a new snapshot and move your branch forward to it.',
     usage: ['git commit -m "message"', 'git commit -am "message"   # stage tracked changes + commit', 'git commit --amend -m "better message"', 'git commit --amend --no-edit', 'git commit --amend --no-edit --reset-author   # use your current name/email'],
   },
-  log: { summary: 'Show commit history.', usage: ['git log', 'git log --oneline', 'git log --oneline --all', 'git log main..origin/main   # commits on origin/main not on main'] },
+  log: { summary: 'Show commit history.', usage: ['git log', 'git log --oneline', 'git log --oneline --all', 'git log main..origin/main   # commits on origin/main not on main', 'git log -- <file>           # only commits that touched <file>', 'git log -S "text"          # commits that added or removed "text"'] },
   reflog: {
     summary: 'Your local diary of everywhere HEAD has been. The #1 recovery tool.',
     usage: ['git reflog', 'git reset --hard HEAD@{1}   # go back to where you were one step ago', 'git branch rescue HEAD@{3}  # save an old position as a branch'],
@@ -73,6 +73,14 @@ export const COMMAND_DOCS: Record<string, { summary: string; usage: string[] }> 
   clean: {
     summary: 'Delete untracked files. There is no undo, so always dry-run first.',
     usage: ['git clean -n      # dry run: list what would go', 'git clean -nd     # including untracked folders', 'git clean -fd     # really delete files + folders ⚠️', 'git clean -fdx    # also ignored files ⚠️'],
+  },
+  blame: {
+    summary: 'Show, for every line of a file, the last commit that changed it and who made it.',
+    usage: ['git blame <file>', 'git blame -L 10,20 <file>   # only lines 10-20', 'git blame <commit> <file>   # as of an older commit'],
+  },
+  bisect: {
+    summary: 'Binary-search history for the commit that broke something. Git checks out commits, you say good or bad.',
+    usage: ['git bisect start', 'git bisect bad              # the current commit is broken', 'git bisect good <commit>    # this one worked', 'git bisect good / bad       # after testing each commit git checks out', 'git bisect run npm test     # let git test every step for you', 'git bisect reset            # back to where you started'],
   },
   fsck: { summary: 'Check the object database. With --lost-found it lists dangling commits (e.g. dropped stashes).', usage: ['git fsck --lost-found'] },
   fetch: { summary: "Download new commits from the remote and update origin/* labels. Doesn't touch your branches or files.", usage: ['git fetch', 'git fetch --prune'] },
