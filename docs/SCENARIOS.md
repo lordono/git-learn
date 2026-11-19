@@ -111,6 +111,23 @@ Levels can define a test suite (`world.tests`: "file X must / must not contain Y
 | ✅ | **`rm -rf .git`**: repo gone, files (and unpushed work) still on disk | `init`, `remote add`, `fetch`, `reset` (mixed!) `origin/main`, `branch -u`, commit, push |
 | | **Archaeology++**: the culprit is found with bisect, but it was squash-merged | `bisect run`, `revert`, explain squash merges |
 
+## 7. lazygit — `lazygit.ts`
+
+The terminal can be swapped for a lazygit-style screen (Status / Files / Branches / Commits / Stash + diff + command log). Keys follow lazygit's defaults, and each one runs real git commands that appear in the command log. The lazygit chapter replays earlier levels with a key walkthrough. On the levels in `LAZYGIT_UNLOCKABLE`, a 🔒 toggle opens once the level is beaten with plain git.
+
+| # | Level | Keys | What lazygit runs |
+|---|---|---|---|
+| ✅ | stage & commit | `space`, `c` | `git add`, `git commit -m` |
+| ✅ | stash, pull, pop | `s`, `p`, `g` | `git stash push -m`, `git pull`, `git stash pop` |
+| ✅ | push rejected | `P`, `p`, `P` | `git push`, `git pull`, `git push` |
+| ✅ | resolve a conflict | `p`, `enter`, `← →`, `space` | `git pull`, write file, `git add`, `git commit --no-edit` |
+| ✅ | fixup without a todo list | `f`, `f`, `P` (force prompt) | `git rebase -i` + todo, `git push --force-with-lease` |
+| ✅ | reword an old commit | `r` | `git rebase -i` + reword + message |
+| ✅ | copy & paste a commit | `c`, `space`, `v` | `git switch`, `git cherry-pick` |
+| | undo with `z` (reflog-based) | `z` / `Z` | needs care to match lazygit's real undo semantics |
+| | line/hunk staging | `enter` on a file | needs partial staging in the engine |
+| | reflog tab, remote branches tab | | |
+
 ## Engine backlog (unlocks 🟡 levels)
 
 Done: `blame` (incl. `-L`, uncommitted lines), `bisect` (start/good/bad/skip/run/log/reset), `log -S` and `log -- <path>`, sandbox `npm test`, `rebase -i` (todo editor, reword/edit/squash/fixup/drop, `--edit-todo`), `git commit` without `-m` opens the editor, `revert -m`, `--ours/--theirs`, modify/delete conflicts, `tag`, `clean`, `fsck --lost-found`, `stash apply <sha>`, `commit --reset-author`, pull-request-only branches.

@@ -2,7 +2,9 @@ import './style.css';
 import { runLine, saveEditor } from './engine/shell';
 import { clone } from './engine/repo';
 import type { Line, World } from './engine/types';
-import { LEVELS, type Level } from './levels/levels';
+import { LEVELS, type Level, lazygitMode } from './levels/levels';
+import { type Step, execStep } from './lazygit/model';
+import { LazyGitView, type LogEntry } from './ui/lazygit';
 import { EDITOR, fireEvents, isSolved, safeCheck, startLevel } from './levels/runtime';
 import { renderGraph } from './ui/graph';
 import { esc, renderRemote, renderTrees } from './ui/panels';
@@ -36,7 +38,17 @@ interface State {
   showSolution: boolean;
   cmdHistory: string[];
   histPos: number;
+  mode: 'terminal' | 'lazygit';
 }
+
+const MODE_KEY = 'git-learn:mode';
+const loadModePref = () => {
+  try {
+    return localStorage.getItem(MODE_KEY) === 'lazygit';
+  } catch {
+    return false;
+  }
+};
 
 const completed = loadCompleted();
 let S: State;
@@ -60,12 +72,13 @@ app.innerHTML = `
     <div class="brief" id="brief"></div>
   </section>
   <section class="panel terminal">
-    <div class="panel-head"><div class="lights"><i></i><i></i><i></i></div><h3>terminal · sandbox</h3><span></span></div>
+    <div class="panel-head"><div class="lights"><i></i><i></i><i></i></div><h3 id="termTitle">terminal · sandbox</h3><div class="mode-toggle" id="modeToggle"></div></div>
     <div class="term-body" id="termBody">
       <div id="termOut"></div>
       <div class="input-line"><span class="p" id="prompt"></span><input id="termInput" autocomplete="off" autocapitalize="off" spellcheck="false" aria-label="Terminal input" /></div>
     </div>
     <div class="chips" id="chips"></div>
+    <div class="lg-root" id="lgRoot" hidden></div>
   </section>
   <aside class="right">
     <section class="panel">
@@ -90,6 +103,7 @@ app.innerHTML = `
 
 const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
 const termOut = $('termOut');
+const lg = new LazyGitView($('lgRoot'), { world: () => S.world, run: (steps) => runLazySteps(steps) });
 const termBody = $('termBody');
 const input = $<HTMLInputElement>('termInput');
 
@@ -133,6 +147,7 @@ function renderBrief() {
     <ul class="goals">${goals.join('')}</ul>
     ${S.solved ? `<div class="win"><h4>🎉 Level complete</h4><p>${esc(l.lesson)}</p>${next ? `<button class="btn primary" id="nextBtn">Next: ${esc(next.title)} →</button>` : '<p><b>You finished every level!</b> More scenarios are coming.</p>'}</div>` : ''}
     <div class="hints">${hints.join('')}</div>
+    ${S.showSolution && lazygitMode(l) === 'tutorial' ? '<div class="hint">The keys are in the story above. These are the git commands lazygit runs for you:</div>' : ''}
     ${S.showSolution ? `<div class="solution">${l.solution
       .map((c) => (c.startsWith(EDITOR) ? `✎ in the editor, save:\n${c.slice(EDITOR.length).replace(/^/gm, '    ')}` : '$ ' + c))
       .map(esc)
@@ -153,6 +168,7 @@ function renderState() {
   $('graphNote').textContent = op ? `${op.kind} in progress` : '';
   renderPrompt();
   renderBrief();
+  if (S.mode === 'lazygit') lg.render();
 }
 
 function renderChips() {
@@ -166,7 +182,10 @@ const scrollTerm = () => requestAnimationFrame(() => (termBody.scrollTop = termB
 function loadLevel(i: number) {
   const level = LEVELS[Math.max(0, Math.min(LEVELS.length - 1, i))];
   const { world, transcript } = startLevel(level);
-  S = { level, world, history: [], fired: new Set(), hintsShown: 0, solved: false, showSolution: false, cmdHistory: S?.cmdHistory ?? [], histPos: -1 };
+  const lgm = lazygitMode(level);
+  const mode = lgm === 'tutorial' || (lgm === 'unlockable' && completed.has(level.id) && loadModePref()) ? 'lazygit' : 'terminal';
+  S = { level, world, history: [], fired: new Set(), hintsShown: 0, solved: false, showSolution: false, cmdHistory: S?.cmdHistory ?? [], histPos: -1, mode };
+  lg.reset();
   try {
     history.replaceState(null, '', `#${level.id}`);
   } catch {
@@ -186,10 +205,65 @@ function loadLevel(i: number) {
     print([{ kind: 'info', text: '── your turn ──' }]);
   }
   renderLevels();
-  renderState();
-  input.focus({ preventScroll: true });
+  applyMode();
   scrollTerm();
   openGitEditorIfWaiting();
+}
+
+// ───── terminal / lazygit mode ─────
+function renderModeToggle() {
+  const lgm = lazygitMode(S.level);
+  const el = $('modeToggle');
+  if (!lgm) {
+    el.innerHTML = '';
+    return;
+  }
+  const locked = lgm === 'unlockable' && !completed.has(S.level.id);
+  el.innerHTML = `<button class="${S.mode === 'terminal' ? 'on' : ''}" data-mode="terminal">Terminal</button><button class="${S.mode === 'lazygit' ? 'on' : ''}" data-mode="lazygit" ${locked ? 'disabled title="Finish this level with plain git commands first to unlock lazygit mode"' : 'title="Do the same thing with a lazygit-style UI"'}>${locked ? '🔒 ' : ''}lazygit</button>`;
+}
+
+function applyMode() {
+  const lazy = S.mode === 'lazygit';
+  termBody.hidden = lazy;
+  $('chips').hidden = lazy;
+  $('lgRoot').hidden = !lazy;
+  $('termTitle').textContent = lazy ? 'lazygit · sandbox' : 'terminal · sandbox';
+  renderModeToggle();
+  renderState();
+  if (lazy) lg.focus();
+  else input.focus({ preventScroll: true });
+}
+
+function setMode(mode: 'terminal' | 'lazygit') {
+  S.mode = mode;
+  if (lazygitMode(S.level) === 'unlockable') {
+    try {
+      localStorage.setItem(MODE_KEY, mode);
+    } catch {
+      /* not remembered */
+    }
+  }
+  applyMode();
+  scrollTerm();
+}
+
+/** run what a lazygit key asked for through the same pipeline as typed commands */
+function runLazySteps(steps: Step[]): { ok: boolean; log: LogEntry[]; errLines: Line[] } {
+  const log: LogEntry[] = [];
+  for (const step of steps) {
+    const { res, label } = execStep(S.world, step);
+    if (!label && res.world === S.world) continue;
+    termOut.insertAdjacentHTML('beforeend', cmdHtml(`${label}   # via lazygit`, S.world));
+    print(res.lines);
+    if (res.world !== S.world) commitWorld(res.world);
+    log.push({ kind: res.ok ? 'cmd' : 'err', text: label });
+    const events = afterChange(label);
+    events.forEach((text) => log.push({ kind: 'event', text }));
+    if (!res.ok) return { ok: false, log, errLines: res.lines };
+  }
+  if (S.solved) log.push({ kind: 'event', text: '🎉 All goals complete! See the lesson on the left.' });
+  openGitEditorIfWaiting();
+  return { ok: true, log, errLines: [] };
 }
 
 function commitWorld(next: World) {
@@ -198,20 +272,26 @@ function commitWorld(next: World) {
   S.world = next;
 }
 
-function afterChange(line: string) {
+function afterChange(line: string): string[] {
   // scripted teammate events
   const ev = fireEvents(S.level, S.world, line, S.fired);
   S.world = ev.world;
   print(ev.messages.map((text) => ({ kind: 'event', text })));
   if (!S.solved && isSolved(S.level, S.world)) {
     S.solved = true;
+    const firstTime = !completed.has(S.level.id);
     completed.add(S.level.id);
     saveCompleted(completed);
     print([{ kind: 'success', text: '🎉 All goals complete! See the lesson on the left.' }]);
+    if (firstTime && lazygitMode(S.level) === 'unlockable' && S.mode === 'terminal') {
+      print([{ kind: 'info', text: '🔓 lazygit mode unlocked for this level. Restart it and flip the toggle above the terminal to see how lazygit does the same job.' }]);
+      renderModeToggle();
+    }
     renderLevels();
   }
   renderState();
   scrollTerm();
+  return ev.messages;
 }
 
 function runCommand(raw: string) {
@@ -405,6 +485,10 @@ $('chips').addEventListener('click', (e) => {
   input.focus();
 });
 $('rewindBtn').addEventListener('click', rewind);
+$('modeToggle').addEventListener('click', (e) => {
+  const b = (e.target as HTMLElement).closest<HTMLButtonElement>('[data-mode]');
+  if (b && !b.disabled) setMode(b.dataset.mode as 'terminal' | 'lazygit');
+});
 $('restartBtn').addEventListener('click', () => loadLevel(LEVELS.indexOf(S.level)));
 $('hintBtn').addEventListener('click', showHint);
 $('solutionBtn').addEventListener('click', () => {
